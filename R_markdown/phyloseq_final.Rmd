@@ -1,0 +1,534 @@
+---
+title: "phyloseq_v121724"
+author: "Blake"
+date: "2023-07-18"
+output: html_document
+---
+
+## Load packages
+```{r setup, include=FALSE}
+library(here)
+library(dada2)
+library(phyloseq)
+library(ggplot2)
+library(tidyverse)
+library(Biostrings)
+library(ShortRead)
+#library(tsne)
+library(metagMisc)
+library(vegan)
+#library(readxl)
+library(metagenomeSeq)
+library(tsne)
+library(compositions)
+#library(ALDEx2)
+library(biomformat)
+#library(KEGGREST)
+library(Maaslin2)
+library(ggpubr)
+library(ggcorrplot)
+library(reshape2)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Prep workspace
+```{r}
+# phyloseq object
+ps <- readRDS(file = here("data/dada2/ps_ASVs.rds"))
+
+# extract metadata
+metadata <- data.frame(sample_data(ps))
+
+# filter "healthy" participants
+metadata_healthy <- metadata %>%
+  filter(Anamnesis == '0') %>%
+  filter(Breast_disease == '0') %>%
+  filter(Combined_disease == '0') %>%
+  filter(Deficiency_of_G6PD == '0') %>%
+  filter(GDM == '0') %>%
+  filter(HDP == '0') %>%
+  filter(Hepatopathy == '0') %>%
+  filter(Hysteromyoma == '0') %>%
+  filter(Infection == '0') %>%
+  filter(Intrahepatic_cholestasis_of_pregnancy == '0') %>%
+  filter(Ovary_disease == '0') %>%
+  filter(Pelvic_adhesions == '0') %>%
+  filter(Scar_uterus == '0') %>%
+  filter(Streptococcal_infection == '0') %>%
+  filter(Thalassemia == '0') %>%
+  filter(Thyroid_disease == '0') %>%
+  filter(Uteroplacental_insufficiency == '0') %>%
+  filter(Medication_use == '0') %>%
+  filter(Progesterone_use == '0') %>%
+  filter(Twins == '0') %>%
+  filter(Hypertension == '1' | Hypertension == '2') %>%
+  drop_na(Infant_gender) %>%
+  drop_na(BMI_before_pregnancy) %>%
+  drop_na(Residency_status) %>%
+  drop_na(Gestation_week) %>%
+  drop_na(Parity) %>%
+  drop_na(Age) %>%
+  mutate(Infant_gender = as.factor(Infant_gender)) %>%
+  # mutate(Infant_gender = as.factor(case_when(Infant_gender == 1 ~ 0,
+  #                                            Infant_gender == 2 ~ 1))) %>%
+  mutate(BMI_before_pregnancy = scale(BMI_before_pregnancy)) %>%
+  mutate(Residency_status = as.factor(Residency_status)) %>%
+  mutate(Gestation_week = scale(Gestation_week)) %>%
+  mutate(Parity = scale(Parity)) %>%
+  mutate(Age = scale(Age)) %>%
+  mutate(Sex_Residency = paste0(Infant_gender, Residency_status))
+
+# Sex_Residency info
+##########################################
+#11 = male & native
+#12 = male & immigrant
+#21 = female & native
+#22 = female & immigrant
+
+# create phyloseq object with only healthy samples
+ps.healthy <- ps
+sample_data(ps.healthy) <- metadata_healthy
+
+# save ps.healthy
+#saveRDS(ps.healthy, file = here("data/phyloseq/ps_healthy.rds"))
+```
+
+## Prevelence filtering
+```{r}
+# Define the abundance filter function
+abundance_filter <- function(x) {
+  sum(x) > 0.01
+}
+
+# Apply the abundance filter
+ps_abundance_filtered <- filter_taxa(ps.healthy, abundance_filter, TRUE)
+
+print(ps)
+print(ps_abundance_filtered)
+
+# # Define the prevalence filter function
+# prevalence_filter <- function(x) {
+#   prevalence_threshold <- 0.40 # 10% prevalence threshold
+#   prevalence <- sum(x > 0) / length(x)
+#   prevalence > prevalence_threshold
+# }
+# 
+# # Apply the prevalence filter
+# ps.f <- filter_taxa(ps_abundance_filtered, prevalence_filter, TRUE)
+# 
+# # Print the resulting phyloseq object
+# print(ps.f)
+
+# save file
+#saveRDS(ps.f, file = here("data/phyloseq/ps_healthy_filtered_121724.rds"))
+```
+
+```{r}
+# Define the prevalence filter function
+prevalence_filter <- function(x) {
+  prevalence_threshold <- 0.10 # 10% prevalence threshold
+  prevalence <- sum(x > 0) / length(x)
+  prevalence > prevalence_threshold
+}
+
+# Apply the prevalence filter
+ps.f <- filter_taxa(ps_abundance_filtered, prevalence_filter, TRUE)
+
+# Print the resulting phyloseq object
+print(ps.f)
+
+# save file
+#saveRDS(ps.f, file = here("data/phyloseq/ps_healthy_filtered_010325.rds"))
+```
+
+
+
+
+## Subset male and female phyloseq objects
+```{r}
+# female: Infant_gender == 2
+ps_female <- subset_samples(ps.f, Infant_gender == 2)
+
+# male: Infant_gender == 1
+ps_male <- subset_samples(ps.f, Infant_gender == 1)
+
+# save rds files
+#saveRDS(ps_female, file = here("data/phyloseq/female_healthy_rawcounts.rds"))
+#saveRDS(ps_male, file = here("data/phyloseq/male_healthy_rawcounts.rds"))
+```
+
+## Normalize counts
+```{r}
+#Step 1: CSS transform the data
+####################################################################
+css <- phyloseq_transform_css(ps.f, norm= TRUE, log = TRUE)
+
+otu_table(css) <- round(otu_table(css))
+
+#saveRDS(css, file = here("data/phyloseq/ps_healthy_css.rds"))
+```
+
+## Subset male and female phyloseq objects
+```{r}
+# female: Infant_gender == 2
+css_female <- subset_samples(css, Infant_gender == 2)
+
+# male: Infant_gender == 1
+css_male <- subset_samples(css, Infant_gender == 1)
+
+# save rds files
+#saveRDS(css_female, file = here("data/phyloseq/female_healthy_css.rds"))
+#saveRDS(css_male, file = here("data/phyloseq/male_healthy_css.rds"))
+```
+
+
+```{r}
+tax_table <- tax_table(css)
+# Convert taxonomy table to data frame for easier manipulation
+tax_df <- as.data.frame(tax_table)
+
+# Replace "p__" with "unspecified" in the taxonomy table
+tax_df <- apply(tax_df, MARGIN = 2, function(x) gsub("^p__", "unspecified", x))
+
+# Convert back to taxonomy table class
+tax_table(css) <- tax_df
+
+#Step 2: Taxa agglomerate
+####################################################################
+ps_phylum <- tax_glom(css, "Phylum")
+
+#Step 3: Plot abundances
+####################################################################
+taxa_names(ps_phylum) <- phyloseq::tax_table(ps_phylum)[, "Phylum"]
+psmelt(ps_phylum) %>%
+  ggplot(data = ., aes(x = Infant_gender, y = Abundance)) +
+    #geom_boxplot(outlier.shape  = NA) +
+    geom_violin() +
+    geom_jitter(aes(color = OTU), height = 0, width = .2) +
+    labs(x = "", y = "CSS Normalized Abundance", angle = 45) +
+    facet_wrap(~ OTU, scales = "free", nrow = 2) +
+    scale_x_discrete(labels = c("Male", "Female")) +
+    theme(axis.text.x = element_text(angle = 45, vjust = 0.5, hjust=0.5))+
+  stat_compare_means()
+```
+
+## Alpha diversity
+```{r}
+# calculate richness and Chao1 using vegan package
+data_richness <- estimateR(t(otu_table(css)))                                        
+
+# calculate evenness index using vegan package
+#data_evenness <- diversity(otu_table(css))/ log(specnumber(otu_table(css)))              
+
+# calculate Shannon index using vegan package
+data_shannon <- vegan::diversity(t(otu_table(css)), index = "shannon")    
+
+# calculate Shannon index using vegan package
+data_simpson <- vegan::diversity(t(otu_table(css)), index = "simpson")  
+
+# combine all indices in one data table
+data_alphadiv <- cbind(metadata_healthy, t(data_richness), data_shannon, data_simpson) 
+
+# remove the unnecessary data/vector
+rm(data_richness, data_shannon, data_simpson)                                  
+```
+
+```{r}
+# check normality of alpha diversity metrics
+plot(density(data_alphadiv$data_shannon))
+shapiro.test(data_alphadiv$data_shannon)
+plot(density(data_alphadiv$data_simpson))
+shapiro.test(data_alphadiv$data_simpson)
+plot(density(data_alphadiv$S.chao1))
+shapiro.test(data_alphadiv$S.chao1)
+```
+
+```{r}
+# Check for multicollinearity
+#######################################################################################
+# create reduced dataset
+reduced_data <- data_alphadiv[, c("Infant_gender", "Residency_status", "Parity", "Gestation_week", "Age", "BMI_before_pregnancy")] %>%
+  mutate(Infant_gender = as.numeric(Infant_gender)) %>%
+  mutate(Residency_status = as.numeric(Residency_status))
+
+# use create multilinear regression model for shannon diversity
+lm_shannon <- lm(data_shannon ~  Infant_gender + Residency_status + Parity + Gestation_week
+            + Age + BMI_before_pregnancy + Infant_gender*Gestation_week, data = data_alphadiv)
+
+# summarize data
+summary(lm_shannon)
+```
+
+
+```{r}
+# extract coefficients
+shannon_coefs <- lm_shannon$coefficients
+
+
+# Ensure the intercept is handled separately
+adj_data_shannon <- shannon_coefs["(Intercept)"]  # Start with the intercept
+
+# Loop through each predictor variable and apply the adjustment
+for (var in names(shannon_coefs)[-1]) {  # Exclude intercept
+  if (var %in% colnames(data_alphadiv)) {  # Check if variable is in dataframe
+    adj_data_shannon <- adj_data_shannon + (data_alphadiv[[var]] * shannon_coefs[var])
+  }
+}
+
+# Add adjusted values as a new column in the dataframe
+data_alphadiv$adj_data_shannon <- adj_data_shannon
+
+# Print a preview of the updated dataframe
+head(data_alphadiv)
+```
+
+```{r}
+# extract coefficients
+shannon_coefs <- lm_shannon$coefficients
+
+# Select relevant predictors from data_alphadiv
+predictors <- model.matrix(lm_shannon, data_alphadiv)
+
+# Compute adjusted values
+data_alphadiv$adj_data_shannon <- predictors %*% shannon_coefs
+
+# Print the first few rows
+head(data_alphadiv)
+```
+
+
+
+```{r}
+# check normality of residuals
+#######################################################################################
+# Plot the residuals
+qqnorm(lm_shannon$residuals)
+# Plot the Q-Q line
+qqline(lm_shannon$residuals)
+
+# Compute correlation at 2 decimal places
+corr_matrix = round(cor(reduced_data), 2)
+
+# Compute and show the  result
+ggcorrplot(corr_matrix, hc.order = TRUE, type = "lower",
+          lab = TRUE)
+
+lm_simpson <- lm(data_simpson ~ Infant_gender + Residency_status + Parity + Gestation_week
+            + Age + BMI_before_pregnancy + Infant_gender*Gestation_week, data = data_alphadiv)
+summary(lm_simpson)
+
+# summarize data
+summary(lm_simpson)
+
+# check normality of residuals
+#######################################################################################
+# Plot the residuals
+qqnorm(lm_simpson$residuals)
+# Plot the Q-Q line
+qqline(lm_simpson$residuals)
+```
+
+
+```{r}
+# extract coefficients
+simpson_coefs <- lm_simpson$coefficients
+
+# Select relevant predictors from data_alphadiv
+predictors <- model.matrix(lm_simpson, data_alphadiv)
+
+# Compute adjusted values
+data_alphadiv$adj_data_simpson <- predictors %*% simpson_coefs
+
+# Print the first few rows
+head(data_alphadiv)
+```
+
+
+```{r}
+lm_chao <- lm(S.chao1 ~ Infant_gender + Residency_status + Parity + Gestation_week
+            + Age + BMI_before_pregnancy + Infant_gender*Gestation_week, data = data_alphadiv)
+
+# summarize data
+summary(lm_chao)
+# check normality of residuals
+#######################################################################################
+# Plot the residuals
+qqnorm(lm_chao$residuals)
+# Plot the Q-Q line
+qqline(lm_chao$residuals)
+
+# extract coefficients
+chao_coefs <- lm_chao$coefficients
+
+# Select relevant predictors from data_alphadiv
+predictors <- model.matrix(lm_chao, data_alphadiv)
+
+# Compute adjusted values
+data_alphadiv$adj_data_chao <- predictors %*% chao_coefs
+
+# Print the first few rows
+head(data_alphadiv)
+```
+
+```{r}
+levels(data_alphadiv$Infant_gender) <- c("M", "F")
+
+my_comparisons <- list(c("M", "F"))
+
+# Convert data from wide to long format for faceting
+data_long <- data_alphadiv %>%
+  dplyr::select(Sex = Infant_gender, adj_data_shannon, adj_data_simpson, adj_data_chao) %>%
+  pivot_longer(cols = c(adj_data_shannon, adj_data_simpson, adj_data_chao), 
+               names_to = "Diversity_Metric", 
+               values_to = "Adjusted_Value")
+
+cols <- c("M" = "#50B93A", "F" = "#9C7FB9")
+
+new_labels <- c(adj_data_shannon = "Shannon Diversity",
+                adj_data_simpson = "Simpson Diversity",
+                adj_data_chao = "Chao1 Diversity")
+
+# Create boxplot with facets
+ggplot(data_long, aes(x = Sex, y = Adjusted_Value, fill = Sex)) +
+  geom_violin(trim = FALSE) +
+  geom_jitter(width = 0.2, alpha = 0.5) +  # Add individual points for visibility
+  facet_wrap(~ Diversity_Metric, scales = "free_y", labeller = labeller(Diversity_Metric = new_labels)) +  # Separate facets for each metric
+  scale_fill_manual(values = cols) +  # Adjust colors for male/female
+  labs(title = "Adjusted Alpha Diversity Metrics by Sex",
+       x = "Sex",
+       y = "Adjusted Diversity Metric") +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold"))+
+  stat_compare_means(comparisons = my_comparisons, 
+                     method = "wilcox.test", 
+                     aes(label = after_stat(p.signif)), 
+                     hide.ns = TRUE) 
+```
+
+```{r}
+ggplot(data_long, aes(x = Sex, y = Adjusted_Value, fill = Sex)) +
+    geom_violin(trim = FALSE) +
+    facet_wrap(~ Diversity_Metric, scales = "free_y", labeller = labeller(Diversity_Metric = new_labels)) +
+    theme_bw() +
+    theme(text=element_text(size=20), #change font size of all text
+        axis.text=element_text(size=14), #change font size of axis text
+        axis.title=element_text(size=16), #change font size of axis titles
+        plot.title=element_text(size=20), #change font size of plot title
+        legend.text=element_text(size=20), #change font size of legend text
+        legend.title=element_text(size=20)) + #change font size of legend title 
+    labs(#title = "Violin Plot of Diversity Metrics by Infant Gender and Residency Status",
+         x = "Fetal Sex",
+         y = "Covariate-corrected alpha diversity") +
+    theme(legend.position = "bottom") +
+  scale_x_discrete(labels = c("Male", "Female")) +
+  scale_fill_manual(values = cols, guide = "none") +
+  stat_compare_means(comparisons = my_comparisons, method = "wilcox.test", aes(label = after_stat(p.signif)), hide.ns = TRUE)
+```
+
+
+
+
+```{r}
+# Convert data from wide to long format for faceting
+data_long <- data_alphadiv %>%
+  dplyr::select(Sex = Infant_gender, Gestation_week, adj_data_shannon, adj_data_simpson, adj_data_chao) %>%
+  pivot_longer(cols = c(adj_data_shannon, adj_data_simpson, adj_data_chao), 
+               names_to = "Diversity_Metric", 
+               values_to = "Adjusted_Value")
+
+
+# Create the plot
+ggplot(data_long, aes(x = Gestation_week, y = Adjusted_Value, color = Sex, fill = Sex)) +
+  geom_smooth(method = "loess", span = 0.75, se = TRUE, alpha = 0.3) +  # Smoothed trend lines
+  facet_wrap(~ Diversity_Metric, scales = "free_y", labeller = labeller(Diversity_Metric = new_labels)) +  # Separate facets for each metric
+  scale_color_manual(values = cols) +  # Adjust line colors for sex
+  scale_fill_manual(values = cols) +   # Adjust confidence interval colors
+  labs(title = "Adjusted Alpha Diversity Metrics Over Gestation Weeks",
+       x = "Gestation Week",
+       y = "Adjusted Diversity Metric",
+       color = "Sex",
+       fill = "Sex") +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold"))
+```
+
+```{r}
+#function to plot linear regression
+ggplotRegression <- function(fit) {
+  require(ggplot2)
+  ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) +
+    geom_point() +
+    stat_smooth(method = "lm", col = "red") +
+    labs(title = paste("Adj R2 =", signif(summary(fit)$adj.r.squared, 5),
+                     "Intercept =", signif(fit$coefficients[[1]], 5),
+                     "Slope =", signif(fit$coefficients[[2]], 5),
+                     "P =", signif(summary(fit)$coef[2,4],5)))
+}
+```
+
+
+```{r}
+data_alphadiv_male <- data_alphadiv %>% filter(Infant_gender == "M")
+data_alphadiv_female <- data_alphadiv %>% filter(Infant_gender == "F")
+
+lm_chao_male <- lm(S.chao1 ~ Gestation_week + Residency_status + Parity
+            + Age + BMI_before_pregnancy, data = data_alphadiv_male)
+
+lm_chao_female <- lm(S.chao1 ~ Gestation_week + Residency_status + Parity
+            + Age + BMI_before_pregnancy, data = data_alphadiv_female)
+
+ggplotRegression(lm_chao_male)
+ggplotRegression(lm_chao_female)
+
+lm_shannon_male <- lm(data_shannon ~ Gestation_week + Residency_status + Parity
+            + Age + BMI_before_pregnancy, data = data_alphadiv_male)
+
+lm_shannon_female <- lm(data_shannon ~ Gestation_week + Residency_status + Parity
+            + Age + BMI_before_pregnancy, data = data_alphadiv_female)
+
+ggplotRegression(lm_shannon_male)
+ggplotRegression(lm_shannon_female)
+
+lm_simpson_male <- lm(data_simpson ~ Gestation_week + Residency_status + Parity
+            + Age + BMI_before_pregnancy, data = data_alphadiv_male)
+
+lm_simpson_female <- lm(data_simpson ~ Gestation_week + Residency_status + Parity
+            + Age + BMI_before_pregnancy, data = data_alphadiv_female)
+
+ggplotRegression(lm_simpson_male)
+ggplotRegression(lm_simpson_female)
+```
+
+
+## Beta diversity {.tabset}
+### PCoA
+#### all EGAs
+```{r}
+#Step 1: Calculate the Distance
+ord <- ordinate(css, "PCoA", "bray", weighted = TRUE
+                , formula = Infant_gender + BMI_before_pregnancy + Age + Parity + Residency_status + Gestation_week)
+```
+
+
+```{r}
+sample_data(css) <- metadata_healthy
+
+cols <- c("1" = "#50B93A", "2" = "#9C7FB9")
+
+plot_ordination(css, ord, color = "Infant_gender") +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"), 
+        text = element_text(size = 15)) +
+  scale_color_manual(values = cols, labels = c("Male", "Female")) +
+  #scale_color_discrete(values = cols, labels = c("XY:Native", "XY:Immigrant", "XX:Native", "XX:Immigrant")) +
+  labs(color = "Fetal Sex") +
+  geom_point(size=2.5) +
+  stat_ellipse(aes(group = Infant_gender, colour = Infant_gender), lwd = 1.5)
+```
+### Permanova
+
+```{r}
+adonis2(t(as.matrix(otu_table(css))) ~ Infant_gender + BMI_before_pregnancy + Age + Parity + 
+          Residency_status + Gestation_week + Infant_gender*Gestation_week, data = metadata_healthy, method = "bray")
+```

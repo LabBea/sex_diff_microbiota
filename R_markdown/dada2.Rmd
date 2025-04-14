@@ -1,0 +1,527 @@
+---
+title: "dada2"
+author: "Blake"
+date: "2023-07-18"
+output: html_document
+---
+
+## Load packages
+```{r setup, include=FALSE}
+library(here)
+library(dada2)
+library(phyloseq)
+library(ggplot2)
+library(tidyverse)
+library(Biostrings)
+library(ShortRead)
+library(tsne)
+library(metagMisc)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Dada2
+## Make file path
+```{r files}
+path <- here("..", "raw_data", "fastq")
+head(list.files(path))
+```
+
+## Sort reads
+```{r}
+#forward
+fnFs <- sort(list.files(path, pattern = "_1.fastq.gz", full.names = TRUE))
+#reverse
+fnRs <- sort(list.files(path, pattern = "_2.fastq.gz", full.names = TRUE))
+#pair samples
+sample.names <- sapply(strsplit(basename(fnFs), "_"), '[', 1)
+```
+
+## Quality plots
+```{r}
+#subset of forward quality plots
+plotQualityProfile(fnFs[3:4])
+
+#subset of reverse quality plots
+plotQualityProfile(fnRs[3:4])
+```
+
+## Filter reads
+```{r}
+# Place filtered files in filtered/ subdirectory
+filtFs <- file.path(path, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs <- file.path(path, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+names(filtFs) <- sample.names
+names(filtRs) <- sample.names
+```
+
+
+```{r}
+# Filter reads
+out_final <- NULL
+for(i in seq_along(fnFs)) {
+    print(i)
+    out<-fastqPairedFilter(c(fnFs[i], fnRs[i]), c(filtFs[i], filtRs[i]),verbose=TRUE, 
+                           maxEE=c(2, 2),
+                           truncQ = 2,
+                           multithread=TRUE
+                           #matchIDs=TRUE, 
+                           #truncLen=c(150,150), 
+                           #trimLeft=15
+                           )
+    out_final<-rbind(out_final,out)
+  }
+  write.table(cbind(sample.names,out_final), 
+              file=here("../data/dada2/seqpersample.txt"),
+              sep="\t", row.names=FALSE, col.names=TRUE)
+
+# Remove files with low abundance. APM: So these are samples without many reads?
+  filtFs <- filtFs[out_final[,2]>=5]
+  filtRs <- filtRs[out_final[,2]>=5]
+  sample.names<-sample.names[out_final[,2]>=5]
+  
+  # DEREPLICATION
+  #-------------------------------------------------------
+```
+
+## Learn errors
+```{r}
+errF <- learnErrors(filtFs, nbases = 1e8, multithread=TRUE, randomize = TRUE,
+                    verbose = 1)
+
+errR <- learnErrors(filtRs, nbases = 1e8, multithread=TRUE, randomize = TRUE,
+                    verbose = 1)
+
+plotErrors(errF, nominalQ=TRUE)
+
+plotErrors(errR, nominalQ=TRUE)
+```
+```{r}
+dadaFs <- dada(filtFs, err=errF, multithread=TRUE)
+dadaRs <- dada(filtRs, err=errR, multithread=TRUE)
+```
+
+
+```{r}
+mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose = TRUE)
+
+seqtab <- makeSequenceTable(mergers)
+dim(seqtab)
+
+# Inspect distribution of sequence lengths
+table(nchar(getSequences(seqtab)))
+```
+
+```{r}
+#remove sequences that are too long or too short
+#######################################
+seqtab2 <- seqtab[,nchar(colnames(seqtab)) %in% 250:256]
+# Inspect distribution of sequence lengths
+table(nchar(getSequences(seqtab2)))
+```
+
+
+```{r}
+seqtab.nochim <- removeBimeraDenovo(seqtab2, method="consensus", multithread=TRUE, verbose=TRUE)
+dim(seqtab.nochim)
+sum(seqtab.nochim)/sum(seqtab)
+```
+
+
+```{r}
+getN <- function(x) sum(getUniques(x))
+track <- cbind(out_final, sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(seqtab.nochim))
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track) <- sample.names
+head(track)
+```
+```{r}
+taxa <- assignTaxonomy(seqtab.nochim, 
+                        "../silva_nr99_v138.1_wSpecies_train_set.fa.gz", 
+                       minBoot = 0, outputBootstraps = TRUE, multithread=TRUE )
+
+write.csv(taxa[[1]], file = here("../data/dada2/tax_table.csv"), row.names = TRUE)
+write.csv(taxa[[2]], file = here("../data/dada2/tax_probs.csv"), row.names = TRUE)
+```
+
+
+```{r}
+#load taxa and probability tables
+taxa <- read.csv(here("../data/dada2/tax_table.csv"), header = TRUE, row.names = 1)
+
+taxa_prob <- read.csv(here("../data/dada2/tax_probs.csv"), header = TRUE, row.names = 1)
+
+#replace NA values
+taxa$Kingdom[is.na(taxa$Kingdom)]<-"k__" #I think this line of code is replacing missing values in the column called "Kingdom"
+taxa$Phylum[is.na(taxa$Phylum)]<-"p__"
+taxa$Class[is.na(taxa$Class)]<-"c__"
+taxa$Order[is.na(taxa$Order)]<-"o__"
+taxa$Family[is.na(taxa$Family)]<-"f__"
+taxa$Genus[is.na(taxa$Genus)]<-"g__"
+taxa$Species[is.na(taxa$Species)]<-"s__"
+
+#Remove those taxa that are not identified with high probability
+taxa[which(as.numeric(taxa_prob[,grep("Kingdom", colnames (taxa_prob), fixed=TRUE)])<99),"Kingdom"]<-"k__"
+taxa[which(as.numeric(taxa_prob[,grep("Phylum", colnames (taxa_prob), fixed=TRUE)])<99),"Phylum"]<-"p__"
+taxa[which(as.numeric(taxa_prob[,grep("Class", colnames (taxa_prob), fixed=TRUE)])<99),"Class"]<-"c__"
+taxa[which(as.numeric(taxa_prob[,grep("Order", colnames (taxa_prob), fixed=TRUE)])<99),"Order"]<-"o__"
+taxa[which(as.numeric(taxa_prob[,grep("Family", colnames (taxa_prob), fixed=TRUE)])<99),"Family"]<-"f__"
+taxa[which(as.numeric(taxa_prob[,grep("Genus", colnames (taxa_prob), fixed=TRUE)])<99),"Genus"]<-"g__"
+taxa[which(as.numeric(taxa_prob[,grep("Species", colnames (taxa_prob), fixed=TRUE)])<99),"Species"]<-"s__"
+```
+
+```{r}
+taxa_nonames <- taxa %>%
+  filter(Kingdom == "k__")
+```
+
+```{r}
+seq1 <- "CCCGTTCGCTACCCTAGCTTTCGAGCCTCAGCGTCAGTTACAGTCCAGAAAGCCGCCTTCGCCACTGGTGTTCTTCCCAATATCTACGCATTTCACCGCTACACTGGGAATTCCGCTTTCCTCTCCTGCACTCAAGAAAACCAGTTCGGACCCCATCACGGGGTTGAGCCCCGCACTTTTAAGATCCGCTTAGTTTCCCGCCTGCGCTCCCTTTACGCCCAATAATTCCGGACAACGCTTGCCGCCTACGTA"
+
+allOrients <- function(primer) {
+    # Create all orientations of the input sequence
+    require(Biostrings)
+    dna <- DNAString(primer)  # The Biostrings works w/ DNAString objects rather than character vectors
+    orients <- c(Forward = dna, Complement = Biostrings::complement(dna), Reverse = Biostrings::reverse(dna),
+        RevComp = Biostrings::reverseComplement(dna))
+    return(sapply(orients, toString))  # Convert back to character vector
+}
+seq1.orients <- allOrients(seq1)
+seq1.orients
+```
+```{r}
+any(seq1.orients[4] %in% rownames(taxa))
+
+seq2 <- "CCTGTTTGCTACCCACACTTTCGAGCCTCAGCGTCAGTTGGTGCCCAGTAGGCCGCCTTCGCCACTGGTGTTCCTCCCGATATCTACGCATTCCACCGCTACACCGGGAATTCCGCCTACCTCTGCACTACTCAAGAAAAACAGTTTTGAAAGCAGTTCATGGGTTGAGCCCATGGATTTCACTTCCAACTTGTCTTCCCGCCTGCGCTCCCTTTACACCCAGTAATTCCGGACAACGCTTGTGACCTACGTT"
+
+seq2.orients <- allOrients(seq2)
+seq2.orients
+
+any(seq2.orients[4] %in% rownames(taxa))
+```
+
+# Troubleshooting
+## Create phyloseq object to identify samples with reversed reads
+### Transfer to phyloseq
+```{r}
+metadata <- read.csv("../data/metadata.csv", skip = 2)
+```
+
+```{r}
+report <- read.csv("../raw_data/filereport_read_run_PRJEB31743_tsv.txt", sep = "\t")
+```
+
+
+```{r}
+report_info <- report[, c("run_accession", "sample_alias")]
+report_info$SampleID <- report_info$sample_alias
+```
+
+### Match SampleID and rownames
+```{r}
+seqtab.nochim2 <- seqtab.nochim
+#identify rows in metaclean also in data_grp
+idx <- match(rownames(seqtab.nochim2), report_info$run_accession)
+#subset metaclean using data_grp
+rownames(seqtab.nochim2) <- as.matrix(report_info$SampleID)
+```
+
+### We're working on figuring out how to subset the samples so we know which ones are forward and which ones are reversed
+```{r}
+# add report_info$run_accession column to metadata
+meta_acc <- merge(metadata, report_info[, c("SampleID", "run_accession")], by = "SampleID", all.x = TRUE)
+
+meta_acc <- meta_acc[!is.na(meta_acc$run_accession), ]
+
+rownames(meta_acc) <- meta_acc$run_accession
+
+```
+
+
+```{r}
+ps <- phyloseq(otu_table(seqtab.nochim, taxa_are_rows=FALSE), 
+               sample_data(meta_acc), 
+               tax_table(as.matrix(taxa)))
+
+#save phyloseq object
+# saveRDS(ps, file = here("../data/dada2/ps_nucleotideseq.rds"))
+```
+
+```{r}
+dna <- Biostrings::DNAStringSet(taxa_names(ps))
+names(dna) <- taxa_names(ps)
+ps <- merge_phyloseq(ps, dna)
+taxa_names(ps) <- paste0("ASV", seq(ntaxa(ps)))
+ps
+```
+
+### Beta Diversity  
+```{r}
+#Step 1: Calculate the Distance
+ord <- ordinate(ps, "PCoA", "bray", weighted=TRUE)
+```
+
+
+```{r}
+#Step 2: Plot the Distance
+pca <- plot_ordination(ps, ord, color="Infant_gender") + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"))
+pca
+```
+
+```{r}
+meta_acc$batch <- 0
+
+idx <- pca$data$Axis.1 > 0
+
+meta_acc$batch[idx] <- 1
+
+sample_data(ps) <- meta_acc
+
+#Step 2: Plot the Distance
+pca <- plot_ordination(ps, ord, color="batch") + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"))
+pca
+```
+
+### Subset metadata by batches
+```{r}
+# filter batch 0
+metadata_batch0 <- meta_acc %>%
+  filter(batch == 0)
+
+metadata_batch0_samplenames <- metadata_batch0$run_accession
+
+# filter batch 1
+metadata_batch1 <- meta_acc %>%
+  filter(batch == 1)
+
+metadata_batch1_samplenames <- metadata_batch1$run_accession
+
+# save files
+write.csv(metadata_batch0, file = here("../data/dada2/metadata_batch0.csv"))
+write.csv(metadata_batch1, file = here("../data/dada2/metadata_batch1.csv"))
+
+write.table(metadata_batch0_samplenames, file = here("../data/dada2/sample_list_batch0.txt"))
+write.table(metadata_batch1_samplenames, file = here("../data/dada2/sample_list_batch1.txt"))
+```
+
+After reviewing the Quality profile plots, it looks like batch 0 samples may have the forward and reverse reads switched
+Try swapping forward and reverse reads for these samples and then repeat analysis to see if this fixes the batch issue
+
+## Sort reads
+```{r}
+# use sample.names identified from initial analysis
+# forward
+fnFs2 <- sort(ifelse((sample.names %in% metadata_batch0_samplenames), 
+         list.files("../raw_data/fastq", 
+                    pattern = "_2.fastq.gz", 
+                    full.names = TRUE), 
+         list.files("../raw_data/fastq", 
+                    pattern = "_1.fastq.gz", 
+                    full.names = TRUE)))
+
+# reverse
+fnRs2 <- ifelse((sample.names %in% metadata_batch0_samplenames), 
+         list.files("../raw_data/fastq", 
+                    pattern = "_1.fastq.gz", 
+                    full.names = TRUE), 
+         list.files("../raw_data/fastq", 
+                    pattern = "_2.fastq.gz", 
+                    full.names = TRUE))
+
+#pair samples
+sample.names <- sapply(strsplit(basename(fnFs2), "_"), '[', 1)
+```
+
+## Quality plots
+```{r}
+#subset of forward quality plots
+plotQualityProfile(fnFs2[1:4])
+
+#subset of reverse quality plots
+plotQualityProfile(fnRs2[1:4])
+```
+```{r}
+# Place filtered files in filtered/ subdirectory
+filtFs <- file.path(path, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs <- file.path(path, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+names(filtFs) <- sample.names
+names(filtRs) <- sample.names
+```
+
+## All samples
+```{r}
+out <- filterAndTrim(fnFs2, filtFs, fnRs2, filtRs, 
+                     #truncLen=c(150, 150),
+              maxN=0, maxEE=c(2,2), truncQ=2, rm.phix=TRUE,
+              compress=TRUE, multithread=TRUE, verbose = TRUE)
+head(out)
+```
+## Learn errors
+```{r}
+errF <- learnErrors(filtFs, multithread=TRUE)
+
+errR <- learnErrors(filtRs, multithread=TRUE)
+
+plotErrors(errF, nominalQ=TRUE)
+
+plotErrors(errR, nominalQ=TRUE)
+```
+
+## Sample Inference
+```{r}
+#forward
+dadaFs <- dada(filtFs, err=errF, multithread=TRUE)
+
+#reverse
+dadaRs <- dada(filtRs, err=errR, multithread=TRUE)
+```
+
+## Merge paired reads
+```{r}
+mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose=TRUE)
+# Inspect the merger data.frame from the first sample
+head(mergers[[1]])
+```
+
+## Construct sequence table
+```{r}
+seqtab <- makeSequenceTable(mergers)
+dim(seqtab)
+```
+
+```{r}
+# Inspect distribution of sequence lengths
+table(nchar(getSequences(seqtab)))
+```
+
+
+```{r}
+#remove sequences that are too long or too short
+#######################################
+seqtab2 <- seqtab[,nchar(colnames(seqtab)) %in% 250:256]
+# Inspect distribution of sequence lengths
+table(nchar(getSequences(seqtab2)))
+```
+
+
+## Remove chimeras
+```{r}
+seqtab.nochim <- removeBimeraDenovo(seqtab2, method="consensus", multithread=TRUE, verbose=TRUE)
+#shows total number of samples and ASVs (not reads)
+dim(seqtab.nochim)
+```
+
+```{r}
+#calc percentage of chimeric reads removed
+sum(seqtab.nochim)/sum(seqtab2)
+```
+
+## Track reads thru pipeline
+```{r}
+getN <- function(x) sum(getUniques(x))
+track <- cbind(out, sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(seqtab.nochim))
+# If processing a single sample, remove the sapply calls: e.g. replace sapply(dadaFs, getN) with getN(dadaFs)
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track) <- sample.names
+head(track)
+```
+
+## Assign taxonomy
+```{r}
+taxa_test <- assignTaxonomy(seqtab.nochim, 
+                        "../silva_nr99_v138.1_wSpecies_train_set.fa.gz", 
+                       minBoot = 0, outputBootstraps = TRUE, multithread=TRUE )
+```
+
+
+```{r}
+write.csv(taxa_test[[1]], file = here("../data/dada2/tax_table.csv"), row.names = TRUE)
+write.csv(taxa_test[[2]], file = here("../data/dada2/tax_probs.csv"), row.names = TRUE)
+```
+
+```{r}
+#load taxa and probability tables
+taxa <- read.csv(here("../data/dada2/tax_table.csv"), header = TRUE, row.names = 1)
+
+taxa_prob <- read.csv(here("../data/dada2/tax_probs.csv"), header = TRUE, row.names = 1)
+
+#replace NA values
+taxa$Kingdom[is.na(taxa$Kingdom)]<-"k__" #I think this line of code is replacing missing values in the column called "Kingdom"
+taxa$Phylum[is.na(taxa$Phylum)]<-"p__"
+taxa$Class[is.na(taxa$Class)]<-"c__"
+taxa$Order[is.na(taxa$Order)]<-"o__"
+taxa$Family[is.na(taxa$Family)]<-"f__"
+taxa$Genus[is.na(taxa$Genus)]<-"g__"
+taxa$Species[is.na(taxa$Species)]<-"s__"
+
+#Remove those taxa that are not identified with high probability
+taxa[which(as.numeric(taxa_prob[,grep("Kingdom", colnames (taxa_prob), fixed=TRUE)])<99),"Kingdom"]<-"k__"
+taxa[which(as.numeric(taxa_prob[,grep("Phylum", colnames (taxa_prob), fixed=TRUE)])<99),"Phylum"]<-"p__"
+taxa[which(as.numeric(taxa_prob[,grep("Class", colnames (taxa_prob), fixed=TRUE)])<99),"Class"]<-"c__"
+taxa[which(as.numeric(taxa_prob[,grep("Order", colnames (taxa_prob), fixed=TRUE)])<99),"Order"]<-"o__"
+taxa[which(as.numeric(taxa_prob[,grep("Family", colnames (taxa_prob), fixed=TRUE)])<99),"Family"]<-"f__"
+taxa[which(as.numeric(taxa_prob[,grep("Genus", colnames (taxa_prob), fixed=TRUE)])<99),"Genus"]<-"g__"
+taxa[which(as.numeric(taxa_prob[,grep("Species", colnames (taxa_prob), fixed=TRUE)])<99),"Species"]<-"s__"
+```
+
+```{r}
+View(taxa %>% filter(Kingdom == "k__"))
+
+View(taxa %>% filter(Phylum == "p__"))
+
+View(taxa %>% filter(Class == "c__"))
+```
+
+
+## Confirm batch effects have been removed
+### Create phyloseq object
+```{r}
+# factor batch
+meta_acc <- meta_acc %>%
+  mutate(batch = as.factor(batch))
+
+ps <- phyloseq(otu_table(seqtab.nochim, taxa_are_rows=FALSE), 
+               sample_data(meta_acc), 
+               tax_table(as.matrix(taxa)))
+
+#save phyloseq object
+saveRDS(ps, file = here("../data/dada2/ps_nucleotideseq.rds"))
+```
+
+```{r}
+dna <- Biostrings::DNAStringSet(taxa_names(ps))
+names(dna) <- taxa_names(ps)
+ps <- merge_phyloseq(ps, dna)
+taxa_names(ps) <- paste0("ASV", seq(ntaxa(ps)))
+ps
+
+saveRDS(ps, file = here("../data/dada2/ps_ASVs.rds"))
+```
+
+### Load phylseq object
+```{r}
+ps <- readRDS(file = here("..", "data", "dada2", "ps_ASVs.rds"))
+```
+
+
+### Beta Diversity to confirm we removed the batch effects
+```{r Beta-Diversity}
+#Step 1: Calculate the Distance
+ord <- ordinate(ps, "PCoA", "bray", weighted=TRUE)
+```
+
+
+```{r}
+#Step 2: Plot the Distance
+pca <- plot_ordination(ps, ord, color="batch") + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"))
+pca
+```
+

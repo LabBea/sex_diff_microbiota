@@ -1,0 +1,768 @@
+---
+title: "spiec-easi asv"
+author: "Blake Williams"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: yes
+    df_print: paged
+  pdf_document: default
+  html_notebook:
+    toc: yes
+---
+
+# Prep workspace
+## Load packages
+```{r setup, include=FALSE}
+library(here)
+library(phyloseq)
+library(ggplot2)
+library(tidyverse)
+library(metagMisc)
+library(vegan)
+library(readxl)
+library(dplyr)
+library(SpiecEasi)
+library(igraph)
+library(RCy3)
+library(Matrix)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# prep data
+## picrust kegg data
+### load and filter
+```{r}
+# load metadata
+input_meta <- read.csv(here("data/phyloseq/ps_healthy_sample_meta.csv"), row.names = 1)
+
+# load maaslin2 output
+maaslin.all <- read.csv(here("data/maaslin/lm_kegg_100623_2/all_results.tsv"), sep = "")
+
+# significant enzymes for residency comp
+maaslin.residency <- maaslin.all %>%
+  subset(metadata == "Residency_status") %>%
+  subset(qval < 0.25)
+
+# filter by sex
+maaslin.filtered <- maaslin.all %>%
+  subset(metadata == "sex")
+
+# filter by significant sex enzymes
+maaslin.sex <- maaslin.filtered %>%
+  subset(qval < 0.25)
+
+# create list of significant sex enzyme names
+sex_enzyme_names <- maaslin.sex$feature
+
+# load picrust data file
+picrust.kegg <- read.csv(file = here("data/picrust2/picrust2_out_pipeline/KO_metagenome_out/pred_metagenome_unstrat.tsv"),
+                         sep = "\t", row.names = 1)
+
+# filter picrust.kegg by enzymes in maaslin.filtered
+idx <- which(rownames(picrust.kegg) %in% maaslin.filtered$feature)
+
+picrust.kegg.filtered <- picrust.kegg[idx, ]
+
+# transpose picrust.kegg.filtered
+picrust.kegg.f.t <- as.data.frame(t(picrust.kegg.filtered))
+
+# make phyloseq object with picrust data
+ps.kegg <- phyloseq(otu_table(picrust.kegg, taxa_are_rows=TRUE), 
+               sample_data(input_meta))
+
+rm(idx)
+```
+
+
+### filter enzymes
+```{r}
+# filter enzymes to keep ones with greatest variance between sex groups and statistically significant enzymes via maaslin2 linear models
+##################################################################################################################################
+
+# Calculate the variance for each taxon across different levels of 'sex'
+variance_by_enzyme <- apply(otu_table(ps.kegg), 1, function(x) var(x, na.rm = TRUE))
+
+# Convert the result to a data frame for easier manipulation
+variance_df <- data.frame(enzyme = taxa_names(ps.kegg), variance = variance_by_enzyme)
+
+# Sort taxa based on variance in descending order
+variance_df <- variance_df[order(-variance_df$variance), ]
+
+# Specify the number of top taxa you want to keep (e.g., top 10)
+top_enzymes <- 100
+
+# Extract the names of the top taxa
+top_enzyme_names <- variance_df$enzyme[1:top_enzymes]
+
+# Filter the phyloseq object to keep only the top taxa
+ps.kegg.filtered <- prune_taxa(c(top_enzyme_names, sex_enzyme_names) , ps.kegg)
+
+# Now, 'ps.kegg.filtered' contains only the top taxa with the greatest variance for the 'sex' variable
+```
+
+
+### add covariates
+```{r}
+# convert enzymes from ps.kegg.filtered to data frame
+kegg.f <- as.data.frame(t(as(otu_table(ps.kegg.filtered), "matrix")))
+
+# add gestation weeks and infant gender to picrust.kegg.f.t object
+kegg.f <- cbind(kegg.f,input_meta[ , c("Gestation_week", "Infant_gender", "Parity", "Age", "BMI_before_pregnancy", "Residency_status")])
+
+# change infant gender & residency status to 0 & 1
+# infant gender: 0 (male), 1 (female)
+# residency status: 0 (native residents), 1 (immigrant)
+kegg.f <- kegg.f %>%
+  mutate(Infant_gender = case_when(Infant_gender == 1 ~ 0,
+                                   Infant_gender == 2 ~ 1)) %>%
+  mutate(Residency_status = case_when(Residency_status == 1 ~ 0,
+                                   Residency_status == 2 ~ 1)) %>%
+  mutate(Infant_gender = as.factor(Infant_gender)) %>%
+  mutate(Parity = as.integer(Parity)) %>%
+  mutate(Residency_status = as.factor(Residency_status))
+```
+
+
+## microbiome data
+
+### load data
+
+```{r}
+## Load phylseq object
+ps.f <- readRDS(file = here("data/phyloseq/ps_healthy_css.rds"))
+
+input_taxa <- data.frame(tax_table(ps.f))
+
+# load significant microbes
+sex_only <- read.csv(file = here("data/metagenomeSeq/all_samples_sex_sig_taxa.csv"), row.names = 1)
+ega_only <- read.csv(file = here("data/metagenomeSeq/all_samples_ega_sig_taxa.csv"),row.names = 1)
+sex_and_ega <- read.csv(here("data/metagenomeSeq/all_samples_sex_ega_sig_taxa.csv"), row.names = 1)
+```
+
+```{r}
+# create list of significant sex enzyme names
+sex_asv_names <- unique(c(rownames(sex_only), rownames(ega_only), rownames(sex_and_ega)))
+```
+
+### filter most abundant asvs
+```{r}
+# filter asvs to keep the most abundant ones and statistically significant asvs via metagenomeseq linear models
+##################################################################################################################################
+
+# Calculate the variance for each taxon across different levels of 'sex'
+#abundance_by_asv <- rowSums(picrust.kegg)
+abundance_by_asv <- apply(otu_table(ps.f), 1, function(x) sum(x, na.rm = TRUE))
+
+# Convert the result to a data frame for easier manipulation
+abundance_df <- data.frame(asv = taxa_names(ps.f), abundance = abundance_by_asv)
+
+# Sort taxa based on variance in descending order
+abundance_df <- abundance_df[order(-abundance_df$abundance), ]
+
+# Extract the names of the top taxa
+top_asv_names <- abundance_df$asv[1:100]
+
+# Filter the phyloseq object to keep only the top taxa
+ps.filtered <- prune_taxa(c(top_asv_names, sex_asv_names) , ps.f)
+
+# female: Infant_gender == 2
+ps_female <- subset_samples(ps.filtered, Infant_gender == 2)
+
+# male: Infant_gender == 1
+ps_male <- subset_samples(ps.filtered, Infant_gender == 1)
+
+# delete files
+rm(ps.f)
+```
+
+```{r}
+# save files
+saveRDS(ps.filtered, file = here("data/spiec-easi/microbes/ps_all_asv.rds"))
+saveRDS(ps_female, file = here("data/spiec-easi/microbes/ps_female_asv.rds"))
+saveRDS(ps_male, file = here("data/spiec-easi/microbes/ps_male_asv.rds"))
+```
+
+
+
+### prep count data
+```{r}
+# female: Infant_gender == 2
+ps_female <- readRDS(file = here("data/spiec-easi/microbes/ps_female_asv.rds"))
+
+# male: Infant_gender == 1
+ps_male <- readRDS(file = here("data/spiec-easi/microbes/ps_male_asv.rds"))
+```
+
+
+# Bootstrapping SPIEC-Easi
+
+## bootstrap function
+```{r}
+# subset data function
+subset_data <- function(input_data) {
+  num_rows <- nrow(input_data)
+  sample_size <- round(0.8 * num_rows)
+  sampled_data <- input_data[sample(seq_len(num_rows), size = sample_size), , drop = FALSE]
+  return(sampled_data)
+}
+```
+
+```{r}
+# bootstrap function below
+run_bootstrapped_spiec_easi <- function(input_phyloseq, n = 100) {
+  ### This function takes a phyloseq object as input and outputs bootstrapped spiec-easi correlation matrices ###
+  ################################################################################################################################
+  cov_matrix_original <- list()
+  cov_matrix_shuffled <- list()
+  
+  # maybe want this to be a user defined variable outside of the function????
+  pargs1 <- list(rep.num=50, seed=10010, ncores=8)
+  
+  # Convert phyloseq object to a data frame
+  input_data <- as(t(otu_table(input_phyloseq)), "matrix")
+  
+  cov_matrix_original <- list()
+  cov_matrix_shuffled <- list()
+  # create for loop for n iterations
+  for (i in 1:n) {
+    print(i)
+    # Randomly select 80% of the data
+    sampled_data <- subset_data(input_data)
+  
+    # Run spiec-easi on the sampled data
+    sp_og <- spiec.easi(data = sampled_data, method='glasso',sel.criterion='stars', pulsar.select=TRUE, lambda.min.ratio=1e-2,
+                           nlambda=20, pulsar.params=pargs1)
+    cov_matrix_original[[i]] <- cov2cor(getOptCov(sp_og))
+    
+    # Shuffle data across columns (keeping row sums constant)
+    shuffled_data <- apply(sampled_data, 2, function(x) sample(x))
+    
+    # Run spiec-easi on the shuffled data
+    cov_matrix_shuffled[[i]] <- cov2cor(getOptCov(spiec.easi(data = shuffled_data, method='glasso',sel.criterion='stars', pulsar.select=TRUE, lambda.min.ratio=1e-2,
+                           nlambda=20, pulsar.params=pargs1)))
+    
+  }
+  # Return the covariance matrices
+  result <- list(original = cov_matrix_original, shuffled = cov_matrix_shuffled)
+  return(result)
+
+}
+```
+
+### function to extract elements from vector
+```{r}
+extract_elements <- function(matrix_list) {
+  ################################################################################################################################
+  # Get the number of matrices in the list
+  num_matrices <- length(matrix_list)
+  
+  # Check if the list is not empty
+  if (num_matrices == 0) {
+    stop("Input list is empty.")
+  }
+  
+  # Get the dimensions of the first matrix
+  num_rows <- nrow(matrix_list[[1]])
+  num_cols <- ncol(matrix_list[[1]])
+  
+  # Initialize an empty list to store extracted elements
+  extracted_elements <- vector("list", length = num_rows * num_cols)
+  
+  # Loop through each position in the matrices
+  for (i in 1:num_rows) {
+    for (j in 1:num_cols) {
+      # Extract elements from the same position in each matrix
+      position_elements <- sapply(matrix_list, function(mat) mat[i, j])
+      
+      # Store the extracted elements in the list
+      extracted_elements[[(i - 1) * num_cols + j]] <- position_elements
+    }
+  }
+  
+  return(extracted_elements)
+}
+```
+
+
+# write function that performs t-test on each 
+```{r}
+paired_t_test <- function(list1, list2) {
+  ################################################################################################################################
+  # Check if the lists have the same length
+  if (length(list1) != length(list2)) {
+    stop("Input lists must have the same length.")
+  }
+  
+  # Initialize an empty list to store p-values
+  p_values <- vector("numeric", length = length(list1))
+  
+  # Perform paired t-tests for each pair of items
+  for (i in seq_along(list1)) {
+    result <- t.test(list1[[i]], list2[[i]], paired = TRUE)
+    
+    # Store the p-value in the list
+    p_values[i] <- result$p.value
+  }
+  
+  # convert listed p-values into matrix
+  p_values <- matrix(p_values, nrow = sqrt(length(list1)))
+  return(p_values)
+}
+```
+
+## Test run spiec-easi
+```{r}
+# now try without tax_glom
+pargs1 <- list(rep.num=50, seed=10010, ncores=8)
+
+t2 <- system.time(
+  se_f <- spiec.easi(data = ps_female, method='glasso',sel.criterion='stars', pulsar.select=TRUE, lambda.min.ratio=1e-2,
+                           nlambda=20, pulsar.params=pargs1)
+)
+```
+
+
+
+```{r}
+# bootstrapping spiec-easi
+bootstrapped_se_f <- run_bootstrapped_spiec_easi(ps_female, n = 100)
+bootstrapped_se_m <- run_bootstrapped_spiec_easi(ps_male, n = 100)
+```
+
+
+```{r}
+# save bootstrapped files
+saveRDS(bootstrapped_se_f, here("data/spiec-easi/microbes/bootstrapped_se_asv_f.rds"))
+saveRDS(bootstrapped_se_m, here("data/spiec-easi/microbes/bootstrapped_se_asv_m.rds"))
+```
+
+```{r}
+# read in files
+bootstrapped_se_f <- readRDS(here("data/spiec-easi/microbes/bootstrapped_se_asv_f.rds"))
+bootstrapped_se_m <- readRDS(here("data/spiec-easi/microbes/bootstrapped_se_asv_m.rds"))
+```
+
+
+```{r}
+result_og_f <- extract_elements(bootstrapped_se_f[[1]])
+result_null_f <- extract_elements(bootstrapped_se_f[[2]])
+
+result_og_m <- extract_elements(bootstrapped_se_m[[1]])
+result_null_m <- extract_elements(bootstrapped_se_m[[2]])
+
+result_f <- list(original = result_og_f, null = result_null_f)
+result_m <- list(original = result_og_m, null = result_null_m)
+
+saveRDS(result_f, here("data/spiec-easi/microbes/corr_list_asvs_f.rds"))
+saveRDS(result_m, here("data/spiec-easi/microbes/corr_list_asvs_m.rds"))
+```
+
+
+```{r}
+result_f <- readRDS(here("data/spiec-easi/microbes/corr_list_asvs_f.rds"))
+result_m <- readRDS(here("data/spiec-easi/microbes/corr_list_asvs_m.rds"))
+
+result_og_f <- result_f[[1]]
+result_null_f <- result_f[[2]]
+
+result_og_m <- result_m[[1]]
+result_null_m <- result_m[[2]]
+```
+
+```{r}
+# p-val results for female
+p_val_mat_f <- paired_t_test(result_og_f, result_null_f)
+
+colnames(p_val_mat_f) <- rownames(p_val_mat_f) <- taxa_names(ps_female)
+
+# p-val results for male
+p_val_mat_m <- paired_t_test(result_og_m, result_null_m)
+
+colnames(p_val_mat_m) <- rownames(p_val_mat_m) <- taxa_names(ps_male)
+
+# save un-adjusted p-vals
+saveRDS(p_val_mat_f, here("data/spiec-easi/microbes/p_val_mat_f.rds"))
+saveRDS(p_val_mat_m, here("data/spiec-easi/microbes/p_val_mat_m.rds"))
+```
+
+
+```{r}
+# Apply FDR correction by feature (asv)
+p_adjusted_matrix_f <- apply(p_val_mat_f, 1, function(p) p.adjust(p, method = "fdr"))
+p_adjusted_matrix_m <- apply(p_val_mat_m, 1, function(p) p.adjust(p, method = "fdr"))
+
+# save adjusted p-vals
+saveRDS(p_adjusted_matrix_f, here("data/spiec-easi/microbes/p_val_mat_adjusted_f.rds"))
+saveRDS(p_adjusted_matrix_m, here("data/spiec-easi/microbes/p_val_mat_adjusted_m.rds"))
+```
+
+```{r}
+# read in adjusted p-vals
+p_val_mat_f <- readRDS(here("data/spiec-easi/microbes/p_val_mat_adjusted_f.rds"))
+p_val_mat_m <- readRDS(here("data/spiec-easi/microbes/p_val_mat_adjusted_m.rds"))
+```
+
+## Identify q-val cutoff using pracma package
+```{r}
+# Convert the p-value matrix to a vector, excluding NAs (diagonal)
+pval_vector <- as.vector(p_val_mat_f[upper.tri(p_val_mat_f, diag = FALSE)])
+
+# Remove NA values (if any)
+pval_vector <- pval_vector[!is.na(pval_vector)]
+
+ggplot(data.frame(pval = pval_vector), aes(x = pval)) +
+  geom_histogram(binwidth = 0.05, fill = "steelblue", color = "black", alpha = 0.7) +
+  labs(title = "Distribution of P-values",
+       x = "P-value",
+       y = "Frequency") +
+  theme_minimal()
+
+ggplot(data.frame(pval = pval_vector), aes(x = pval)) +
+  geom_density(fill = "blue", alpha = 0.4) +
+  labs(title = "Density Plot of P-values",
+       x = "P-value",
+       y = "Density") +
+  theme_minimal()
+```
+
+
+```{r}
+thresholds <- c(0.05, 0.01, 0.001, 1E-20)
+sapply(thresholds, function(t) mean(pval_vector < t))
+
+ggplot(data.frame(pval = pval_vector), aes(x = pval)) +
+  stat_ecdf(geom = "step", color = "red") +
+  labs(title = "Cumulative Distribution of P-values",
+       x = "P-value",
+       y = "Cumulative Probability") +
+  theme_minimal()
+
+```
+
+```{r}
+# Compute density
+pval_density <- density(pval_vector)
+
+# Find local maxima (peaks)
+library(pracma)  # Contains findpeaks() function
+peaks <- findpeaks(pval_density$y, nups = 1, ndowns = 1, minpeakheight = 2)
+
+# Extract the first peak and its corresponding p-value
+first_peak_index <- peaks[1, 2]  # Index of the first peak
+first_peak_pval <- pval_density$x[first_peak_index]  # Corresponding p-value
+
+# Print the first peak p-value
+print(paste("First peak p-value:", first_peak_pval))
+```
+
+```{r}
+# Find local minima (valleys)
+valleys <- findpeaks(-pval_density$y, nups = 1, ndowns = 1, minpeakheight = -2)
+
+# Find the first valley to the right of the first peak
+valleys_right <- valleys[valleys[, 2] > first_peak_index, , drop = FALSE]
+if (nrow(valleys_right) > 0) {
+  right_cutoff_index <- valleys_right[1, 2]
+  right_cutoff_pval <- pval_density$x[right_cutoff_index]
+} else {
+  right_cutoff_pval <- NA  # No clear right cutoff found
+}
+
+# Print the identified p-value cutoff
+print(paste("Suggested p-value cutoff:", right_cutoff_pval))
+```
+
+
+```{r}
+ggplot(data.frame(pval = pval_vector), aes(x = pval)) +
+  geom_density(fill = "blue", alpha = 0.4) +
+  geom_vline(xintercept = first_peak_pval, color = "red", linetype = "dashed", size = 1) +
+  geom_vline(xintercept = right_cutoff_pval, color = "green", linetype = "dashed", size = 1) +
+  labs(title = "Density Plot of P-values with Cutoff",
+       x = "P-value",
+       y = "Density") +
+  theme_minimal()
+```
+
+
+
+
+
+
+
+
+
+## Identify q-val cutoff using % edges retained
+```{r}
+# female 
+###################################################################
+
+# Extract upper and lower triangle p-values
+upper_tri <- p_val_mat_f[upper.tri(p_val_mat_f)]
+lower_tri <- p_val_mat_f[lower.tri(p_val_mat_f)]
+
+# Combine both sets of p-values into a single vector
+pval_vector <- c(upper_tri, lower_tri)
+
+# Remove NA values
+pval_vector <- na.omit(pval_vector)
+
+# Determine the 2% quantile (i.e., the p-value threshold to keep only the smallest 2% of p-values)
+pval_cutoff_f <- quantile(pval_vector, 0.03)
+
+# Print the chosen cutoff
+print(pval_cutoff_f)
+
+# Create a new adjacency matrix that retains only significant edges
+significant_edges <- p_val_mat_f < pval_cutoff_f
+
+# Set diagonal to FALSE (since self-loops are not considered)
+diag(significant_edges) <- FALSE
+
+# Count how many edges are retained
+sum(significant_edges, na.rm = TRUE)/2
+```
+
+```{r}
+# male 
+###################################################################
+
+# Extract upper and lower triangle p-values
+upper_tri <- p_val_mat_m[upper.tri(p_val_mat_m)]
+lower_tri <- p_val_mat_m[lower.tri(p_val_mat_m)]
+
+# Combine both sets of p-values into a single vector
+pval_vector <- c(upper_tri, lower_tri)
+
+# Remove NA values
+pval_vector <- na.omit(pval_vector)
+
+# Determine the 2% quantile (i.e., the p-value threshold to keep only the smallest 2% of p-values)
+pval_cutoff_m <- quantile(pval_vector, 0.05)
+
+# Print the chosen cutoff
+print(pval_cutoff_m)
+
+# Create a new adjacency matrix that retains only significant edges
+significant_edges <- p_val_mat_m < pval_cutoff_m
+
+# Set diagonal to FALSE (since self-loops are not considered)
+diag(significant_edges) <- FALSE
+
+# Count how many edges are retained
+sum(significant_edges, na.rm = TRUE)/2
+```
+
+```{r}
+(pval_cutoff_f + pval_cutoff_m)/2
+```
+
+
+
+## Randomly selected q-val cutoff
+
+```{r}
+pval_cutoff <- 1E-20
+
+#pval_cutoff <- 0.0362186975090115
+
+edge_table_f <- ifelse(p_val_mat_f < pval_cutoff, 1, 0)
+
+edge_table_f <- ifelse(is.na(edge_table_f), 0, edge_table_f)
+
+edge_table_m <- ifelse(p_val_mat_m < pval_cutoff, 1, 0)
+
+edge_table_m <- ifelse(is.na(edge_table_m), 0, edge_table_m)
+```
+
+# Function to identify significant edges from p-value list then use those indices to calculate mean from bootstrapped correlation matrices to create a weighted edge matrix
+```{r}
+edge_mat_from_correlations <- function(p_val_list, corr_list, pval_cutoff) {
+  result_list <- list()
+  edges_to_keep <- which(p_val_list < pval_cutoff)
+  
+  # Use sapply to apply the function to the elements of the list indexed by the vector
+  result <- sapply(edges_to_keep, function(index) mean(corr_list[[index]]))
+  names(result) <- edges_to_keep
+
+  for (i in 1:length(corr_list)) {
+    if (i %in% names(result)) {
+      result_list[[i]] <- mean(corr_list[[i]])
+    } else {
+      result_list[[i]] <- 0
+    }
+  }
+  results <- matrix(result_list, nrow = sqrt(length(result_list)))
+  return(results)
+}
+
+test_f <- edge_mat_from_correlations(p_val_mat_f, result_og_f, pval_cutoff)
+
+colnames(test_f) <- rownames(test_f) <- colnames(p_val_mat_f)
+
+test_m <- edge_mat_from_correlations(p_val_mat_m, result_og_m, pval_cutoff)
+colnames(test_m) <- rownames(test_m) <- colnames(p_val_mat_m)
+
+saveRDS(test_f, here("data/spiec-easi/microbes/edge_mat_f_p20.rds"))
+saveRDS(test_m, here("data/spiec-easi/microbes/edge_mat_m_p20.rds"))
+```
+
+# Function to extract lowest taxonomic labels
+
+```{r}
+# read in files
+ps_female <- readRDS(file = here("data/spiec-easi/microbes/ps_female_asv.rds"))
+ps_male <- readRDS(file = here("data/spiec-easi/microbes/ps_male_asv.rds"))
+
+input_taxa <- as.data.frame(tax_table(ps_female))
+
+# get lowest taxa level
+## try converting code below to function
+for (i in 1:nrow(input_taxa)) {
+  if (input_taxa$Species[i] != "s__") {
+    input_taxa$plotnames[i] = paste(input_taxa$Genus[i], input_taxa$Species[i], "(s)", sep = " ")
+  } else if (input_taxa$Genus[i] != "g__") {
+    input_taxa$plotnames[i] = paste(input_taxa$Genus[i], "(g)", sep = " ")
+  } else if (input_taxa$Family[i] != "f__") {
+    input_taxa$plotnames[i] = paste(input_taxa$Family[i], "(f)", sep = " ")
+  } else if (input_taxa$Order[i] != "o__") {
+    input_taxa$plotnames[i] = paste(input_taxa$Order[i], "(o)", sep = " ")
+  } else if (input_taxa$Class[i] != "c__") {
+    input_taxa$plotnames[i] = paste(input_taxa$Class[i], "(c)", sep = " ")
+  } else if (input_taxa$Phylum[i] != "p__") {
+    input_taxa$plotnames[i] = paste(input_taxa$Phylum[i], "(p)", sep = " ")
+  } else {
+    input_taxa$plotnames[i] = paste(input_taxa$Kingdom[i], "(k)", sep = " ")
+  }
+}
+```
+
+```{r}
+# load rds files
+test_f <- readRDS(here("data/spiec-easi/microbes/edge_mat_f.rds"))
+test_m <- readRDS(here("data/spiec-easi/microbes/edge_mat_m.rds"))
+```
+
+
+```{r}
+# create igraph object
+ig2.gl.f.weighted <- adj2igraph(test_f,  vertex.attr=(name=input_taxa))
+
+# create network in cytoscape
+createNetworkFromIgraph(ig2.gl.f.weighted, title = "Female")
+```
+
+```{r}
+# create igraph object
+ig2.gl.m.weighted <- adj2igraph(test_m,  vertex.attr=(name=input_taxa))
+
+# create network in cytoscape
+createNetworkFromIgraph(ig2.gl.m.weighted, title = "Male")
+```
+```{r}
+saveRDS(ig2.gl.f.weighted, here("data/spiec-easi/microbes/ig_weightcor_f.rds"))
+saveRDS(ig2.gl.m.weighted, here("data/spiec-easi/microbes/ig_weightcor_m.rds"))
+```
+
+```{r}
+ig2.gl.f.weighted <- readRDS(here("data/spiec-easi/microbes/ig_weightcor_f.rds"))
+ig2.gl.m.weighted <- readRDS(here("data/spiec-easi/microbes/ig_weightcor_m.rds"))
+```
+
+
+```{r}
+# Assign the sample label to edges
+E(ig2.gl.f.weighted)$sample <- "female"
+E(ig2.gl.m.weighted)$sample <- "male"
+
+combined_graph <- igraph::union(ig2.gl.f.weighted, ig2.gl.m.weighted)
+
+#E(combined_graph)$weight <- as.numeric(E(combined_graph)$weight)
+
+E(combined_graph)$weight_1 <- as.numeric(E(combined_graph)$weight_1)
+
+E(combined_graph)$weight_2 <- as.numeric(E(combined_graph)$weight_2)
+
+# Ensure Cytoscape is running
+cytoscapePing()
+
+# Convert to Cytoscape network
+createNetworkFromIgraph(combined_graph, "Combined_Male_Female_Network")
+```
+
+
+```{r}
+# Get the current edge table to inspect column types
+edge_table <- getTableColumns(table = "edge")
+
+# Convert a specific column (e.g., "weight") from character to numeric
+edge_table$weight_1 <- as.numeric(edge_table$weight_1)
+
+# Update the table in Cytoscape
+loadTableData(edge_table, table = "edge", data.key.column = edge_table$SUID)
+
+```
+
+
+
+
+
+
+
+
+
+## 
+```{r}
+# read in picrust KO to ASV predicted file
+ko_predicted <- read.csv(here("data/picrust2/picrust2_out_pipeline/KO_predicted.tsv"),
+                         sep = "\t",
+                         row.names = 1)
+
+graph_nodes <- read.csv(here("data/spiec-easi/microbes/female_node_table_p20.csv"), row.names = "name")
+
+# Convert rownames to a column for merging
+ko_predicted$ASV <- rownames(ko_predicted)
+graph_nodes$ASV <- rownames(graph_nodes)
+
+# Merge dataframes by ASV
+merged_data <- merge(graph_nodes, ko_predicted[, c("ASV", "K01195")], by = "ASV")
+
+# Filter ASVs with nonzero K01195
+asvs_with_K01195 <- merged_data$ASV[merged_data$K01195 > 0]
+
+# Print result
+print(asvs_with_K01195)
+```
+
+
+## Try to find infomap clusters
+```{r}
+# create unweighted graphs
+unweighted_f <- ifelse(test_f == 0, 0, 1)
+unweighted_m <- ifelse(test_m == 0, 0, 1)
+
+# create igraph object
+ig2_m_unweighted <- adj2igraph(unweighted_m,  vertex.attr=(name=input_taxa))
+ig2_f_unweighted <- adj2igraph(unweighted_f, vertex.attr = (name=input_taxa))
+cluster_m <- cluster_infomap(ig2_m_unweighted)
+cluster_f <- cluster_infomap(ig2_f_unweighted)
+
+communities(cluster_m)
+communities(cluster_f)
+
+membership(cluster_m)
+membership(cluster_f)
+
+cluster_membership <- cbind(male=membership(cluster_m), female=membership(cluster_f))
+```
+
+
+
+Can go into picrust table and look at what taxa is related to what metabolites
+
+Use the top most abundant (100-150) + statistically significant + maybe most variable and use that to create network - want to see if we pick up any strains that are known to express GUSB
+
+Also run using enzymes - pick most abundant in dataset + statstically significant
+
+NOTES: want to combine the above functions into one large function

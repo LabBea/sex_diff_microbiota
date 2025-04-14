@@ -1,0 +1,177 @@
+---
+title: "kegg_rest"
+author: "Blake Williams"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+library(here)
+library(KEGGREST)
+library(tidyverse)
+library(phyloseq)
+```
+
+# KEGGRest
+
+## Prep workspace
+```{r}
+# load metadata
+input_meta <- read.csv(here("data/phyloseq/ps_healthy_sample_meta.csv"), 
+                       row.names = 1)
+```
+
+## Sex (Infant gender) significant associations
+### Load data
+```{r}
+# load maaslin2 output
+maaslin.sex <- read.csv(here("data/maaslin2/all_samples_kegg_sex_ega_interaction_clr_compositions_033125/significant_results.tsv"), sep = "")
+
+# filter by sex
+maaslin.sex <- maaslin.sex %>%
+  subset(metadata == "Infant_gender")
+
+# filter by significant sex enzymes
+maaslin.sex <- maaslin.sex %>%
+  subset(qval < 0.25)
+
+# create list of significant sex enzyme names
+sex_enzyme_names <- maaslin.sex$feature
+```
+
+
+### Extract KEGG info
+```{r}
+kegg_ids <- sex_enzyme_names
+kegg_info <- list(kegg_ids)
+for (i in 1:length(kegg_ids)) {
+  q <- keggGet(kegg_ids[[i]])
+  kegg_info[i] <- q
+}
+```
+
+
+### Combine lists and convert to dataframe
+```{r}
+# save list file
+saveRDS(kegg_info, here("data/maaslin2/kegg/kegg_info_list_sex_all_samples_033125.rds"))
+
+# read in file
+kegg_info <- readRDS(here("data/maaslin2/kegg/kegg_info_list_sex_all_samples_033125.rds"))
+
+# convert to df
+kegg_df <- as.data.frame(do.call(rbind, kegg_info), fill = TRUE)
+
+kegg_df[,1:3] <- lapply(kegg_df[,1:3], function(x) if (is.list(x)) sapply(x, toString) else x)
+
+# save first 3 columns (entry, symbol, name) as csv
+write.csv(kegg_df[,1:3], file = here("data/maaslin2/kegg/kegg_info_df_sex_all_samples_033125.csv"))
+
+# save data frame file
+saveRDS(kegg_df, here("data/maaslin2/kegg/kegg_info_df_sex_all_samples_033125.rds"))
+```
+
+
+## EGA all samples significant associations
+
+### Load data
+```{r}
+# load maaslin2 output
+maaslin.sex <- read.csv(here("data/maaslin2/all_samples_kegg_sex_ega_interaction_clr_compositions_033125/significant_results.tsv"), sep = "")
+
+# filter by sex
+maaslin.sex <- maaslin.sex %>%
+  subset(metadata == "Gestation_week")
+
+# filter by significant sex enzymes
+maaslin.sex <- maaslin.sex %>%
+  subset(qval < 0.25)
+
+# create list of significant sex enzyme names
+sex_enzyme_names <- maaslin.sex$feature
+```
+
+
+### Extract KEGG info
+```{r}
+kegg_ids <- sex_enzyme_names
+kegg_info <- list(kegg_ids)
+for (i in 1:length(kegg_ids)) {
+  q <- keggGet(kegg_ids[[i]])
+  kegg_info[i] <- q
+}
+```
+
+
+### Combine lists and convert to dataframe
+```{r}
+# save list file
+saveRDS(kegg_info, here("data/maaslin2/kegg/kegg_info_list_ega_all_samples_033125.rds"))
+
+# read in file
+kegg_info <- readRDS(here("data/maaslin2/kegg/kegg_info_list_ega_all_samples_033125.rds"))
+
+# convert to df
+kegg_df <- as.data.frame(do.call(rbind, kegg_info), fill = TRUE)
+
+kegg_df[,1:3] <- lapply(kegg_df[,1:3], function(x) if (is.list(x)) sapply(x, toString) else x)
+
+# save first 3 columns (entry, symbol, name) as csv
+write.csv(kegg_df[,1:3], file = here("data/maaslin2/kegg/kegg_info_df_ega_all_samples_033125.csv"))
+
+# save data frame file
+saveRDS(kegg_df, here("data/maaslin2/kegg/kegg_info_df_ega_all_samples_033125.rds"))
+
+```
+
+
+## Sex*EGA interaction all samples significant associations
+
+### Load data
+```{r}
+# load maaslin2 output
+maaslin.sex <- read.csv(here("data/maaslin2/all_samples_kegg_sex_ega_interaction_clr_compositions_033125/significant_results.tsv"), sep = "")
+
+# filter by sex
+maaslin.sex <- maaslin.sex %>%
+  subset(metadata == "sex_ega")
+
+# filter by significant sex enzymes
+maaslin.sex <- maaslin.sex %>%
+  subset(qval < 0.25)
+
+# create list of significant sex enzyme names
+sex_enzyme_names <- maaslin.sex$feature
+```
+
+
+### Extract KEGG info
+```{r}
+kegg_ids <- sex_enzyme_names
+kegg_info <- list(kegg_ids)
+for (i in 1:length(kegg_ids)) {
+  q <- keggGet(kegg_ids[[i]])
+  kegg_info[i] <- q
+}
+```
+
+
+### Combine lists and convert to dataframe
+```{r}
+# save list file
+saveRDS(kegg_info, here("data/maaslin2/kegg/kegg_info_list_sex_ega_all_samples_033125.rds"))
+
+# read in file
+kegg_info <- readRDS(here("data/maaslin2/kegg/kegg_info_list_sex_ega_all_samples_033125.rds"))
+
+# convert to df
+kegg_df <- as.data.frame(do.call(rbind, kegg_info), fill = TRUE)
+
+kegg_df[,1:3] <- lapply(kegg_df[,1:3], function(x) if (is.list(x)) sapply(x, toString) else x)
+
+# save first 3 columns (entry, symbol, name) as csv
+write.csv(kegg_df[,1:3], file = here("data/maaslin2/kegg/kegg_info_df_sex_ega_all_samples_033125.csv"))
+
+# save data frame file
+saveRDS(kegg_df, here("data/maaslin2/kegg/kegg_info_df_sex_ega_all_samples_033125.rds"))
+```

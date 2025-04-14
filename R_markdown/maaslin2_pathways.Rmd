@@ -1,0 +1,171 @@
+---
+title: "maaslin2 pathways - sex*ega model & sex stratified"
+author: "Blake Williams"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: yes
+    df_print: paged
+  pdf_document: default
+  html_notebook:
+    toc: yes
+---
+
+# Prep workspace
+## Load packages
+```{r setup, include=FALSE}
+library(here)
+library(phyloseq)
+library(ggplot2)
+library(tidyverse)
+library(Biostrings)
+library(vegan)
+library(readxl)
+library(metagenomeSeq)
+library(compositions)
+library(Maaslin2)
+library(ggpubr)
+library(quantreg)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load data
+```{r}
+# # load pathways file
+picrust.pw <- read.csv(file = here("data/picrust2/picrust2_out_pipeline/pathways_out/path_abun_unstrat.tsv"),
+                         sep = "\t", row.names = 1)
+
+# # load mapfile - I think this has the enzymes that belong to each pathway
+# picrust.mapfile <- read.csv(file = here("data/picrust2/picrust2_out_pipeline/intermediate/pathways/parsed_mapfile.tsv"),
+#                             sep = " ", header = FALSE)
+```
+
+```{r}
+## Load phylseq object
+ps.f <- readRDS(file = here("data/phyloseq/ps_healthy_filtered_010325.rds"))
+
+input_meta <- data.frame(sample_data(ps.f)) %>%
+  mutate(Infant_gender = case_when(Infant_gender == 2 ~ 1,
+                                   Infant_gender == 1 ~ 0)) %>%
+  mutate(sex_ega = Infant_gender*Gestation_week)
+
+rownames(input_meta) <- input_meta$SampleID
+```
+
+
+## Prevalence and abundance filtering
+```{r}
+min_prevalence <- 0.90
+min_abundance <- 0.90
+
+unfiltered_data <- t(picrust.pw)
+unfiltered_metadata <- input_meta
+ # require at least total samples * min prevalence values 
+        # for each feature to be greater than min abundance
+
+total_samples <- nrow(unfiltered_data)
+min_samples <- total_samples * min_prevalence
+
+# Filter by abundance using zero as value for NAs
+data_zeros <- unfiltered_data
+data_zeros[is.na(data_zeros)] <- 0
+filtered_data <-
+            data.frame(unfiltered_data[, 
+                colSums(data_zeros > min_abundance) > min_samples,
+                drop = FALSE])
+total_filtered_features <-
+            ncol(unfiltered_data) - ncol(filtered_data)
+```
+
+```{r}
+sum(filtered_data ==0)
+```
+
+```{r}
+kegg_matrix <- as.matrix(t(filtered_data))
+
+# # Replace zeros with a small pseudocount
+pseudocount <- min(kegg_matrix[kegg_matrix > 0]) / 2
+kegg_matrix[kegg_matrix == 0] <- pseudocount
+#
+# # CLR transform each KEGG pathway
+clr_transformed <- t(apply(kegg_matrix, 1, compositions::clr))
+#
+# # Convert back to data frame (optional)
+clr_transformed <- as.data.frame(clr_transformed)
+
+#write.csv(clr_transformed, file = here("data/maaslin2/pathways_clr_transformed_final.csv"))
+```
+
+
+## Run maaslin2
+```{r}
+## Fit data
+fit_data <- Maaslin2(
+  input_data = clr_transformed,
+  input_metadata = input_meta,
+  min_abundance = 0,
+  min_prevalence = 0,
+  normalization = "NONE",
+  transform = "NONE",
+  standardize = FALSE,
+  analysis_method = "LM",
+  output = here("data/maaslin2/all_samples_pathways_sex_ega_interaction_clr_040225"),
+  fixed_effects = c("Infant_gender"
+                    , "Age"
+                    , "BMI_before_pregnancy"
+                    , "Parity"
+                    , "Residency_status"
+                    , "Gestation_week"
+                    , "sex_ega"
+                    ),
+  cores = 4
+)
+```
+
+
+## no signficant associations by fetal sex or its interaction with EGA
+<!-- ## Plot data -->
+<!-- ```{r} -->
+<!-- # transpose picrust.pw -->
+<!-- picrust_pw_t <- clr_transformed -->
+
+<!-- picrust_pw_t <- data.frame(picrust_pw_t) -->
+
+<!-- # Add the SampleID column if row names represent samples -->
+<!-- picrust_pw_t$SampleID <- rownames(picrust_pw_t) -->
+
+<!-- # Select only relevant columns from input_meta -->
+<!-- input_meta_subset <- input_meta[, c("Infant_gender", "SampleID"), drop = FALSE] -->
+<!-- #input_meta_subset$SampleID <- rownames(input_meta)  # Ensure SampleID column for merging -->
+
+<!-- # Merge by SampleID -->
+<!-- merged_df <- merge(picrust_pw_t, input_meta_subset, by = "SampleID", all.x = TRUE) -->
+<!-- rownames(merged_df) <- merged_df$SampleID -->
+
+<!-- merged_df <- merged_df[, -1] -->
+
+<!-- # Create violin plot -->
+<!-- my_comparisons <- list(c("0", "1")) -->
+<!-- cols <- c("0" = "#50B93A", "1" = "#9C7FB9") -->
+<!-- ggplot(merged_df, aes(x = as.factor(Infant_gender), y = PENTOSE.P.PWY, fill = as.character(Infant_gender))) + -->
+<!--   geom_violin(trim = FALSE, alpha = 0.6) +  # Violin plot with transparency -->
+<!--   geom_jitter(width = 0.2, alpha = 0.5) +       # Add jittered points for better visualization -->
+<!--   stat_summary(fun = mean, geom = "crossbar", width = 0.5, color = "black") +  # Median line -->
+<!--   scale_fill_manual(values = cols, labels = c("Male", "Female")) + -->
+<!--   scale_x_discrete(labels = c("0" = "Male", "1" = "Female")) + -->
+<!--   labs(title = "Distribution of Pentose.P.Pwy by Infant Gender", -->
+<!--        x = "Fetal Sex", -->
+<!--        y = "Pentose Phosphate Pathway") +  -->
+<!--   theme_minimal() + -->
+<!--   theme( -->
+<!--     text = element_text(size = 16),  # Increases all text size -->
+<!--     axis.text = element_text(size = 14),  # Axis tick labels -->
+<!--     axis.title = element_text(size = 16),  # Axis titles -->
+<!--     strip.text = element_text(size = 16),  # Facet labels (if used) -->
+<!--     legend.text = element_text(size = 14),  # Legend text -->
+<!--     legend.title = element_text(size = 14)  # Legend title -->
+<!--   ) + -->
+<!--   theme(legend.position = "none")  # Remove legend if needed -->
+<!-- ``` -->
+

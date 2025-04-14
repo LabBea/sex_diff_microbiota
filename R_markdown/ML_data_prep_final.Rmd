@@ -1,0 +1,566 @@
+---
+title: "ML_data_prep"
+author: "Blake Williams"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(here)
+library(tidyverse)
+library(igraph)
+library(NBZIMM)
+library(lme4)
+library(SpiecEasi)
+library(LIMON)
+library(ggeffects)
+library(car)
+library(phyloseq)
+library(metagMisc)
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Prep data
+
+### Load metadata
+```{r}
+# load metadata
+ps_ASVs <- readRDS(here("data/dada2/ps_ASVs.rds"))
+
+metadata <- data.frame(ps_ASVs@sam_data) %>%
+  mutate(sex = as.factor(case_when(Infant_gender == 1 ~ 0,
+                                   Infant_gender == 2 ~ 1))) %>%
+  mutate(Residence = as.factor(case_when(Residency_status == 1 ~ 0,
+                                         Residency_status == 2 ~ 1))) %>%
+ # mutate(EGA = scale(Gestation_week)) %>%
+  dplyr::select(c("sex", "Gestation_week", "Age", "BMI_before_pregnancy", "Residence", "Parity", "run_accession", "SampleID")) %>%
+  mutate(Time = 1)
+
+rownames(metadata) <- metadata$SampleID
+
+
+## FIX THIS!!!!!
+#metadata_subset <- prune_samples((sample_names(ps.f)) %in% rownames(metadata), metadata)
+
+#sample_data(ps_filtered) <- metadata
+```
+
+# Model 1 - covariates only
+## Load metagenomeSeq data
+```{r}
+# load phyloseq object
+ps.f <- readRDS(file = here("data/phyloseq/ps_healthy_css.rds"))
+
+# Extract sample names from the phyloseq object
+sample_ids <- sample_names(ps.f)
+covariate_model <- metadata[metadata$run_accession %in% sample_ids,] %>%
+  dplyr::select(c("sex", "Gestation_week", "Age", "BMI_before_pregnancy", "Residence", "Parity")) %>%
+  mutate(Gestation_week = scale(Gestation_week)) %>%
+  mutate(Age = scale(Age)) %>%
+  mutate(BMI_before_pregnancy = scale(BMI_before_pregnancy)) %>%
+  mutate(Parity = scale(Parity))
+
+# # Subset metadata based on matching row names to css_counts column names
+# metadata_subset <- data.frame(sample_data(ps.f)) %>%
+#   mutate(sex = case_when(Infant_gender == 2 ~ 1,
+#                                    Infant_gender == 1 ~ 0))
+
+#write.csv(covariate_model, file = here("data/ML/model1_covariates.csv"))
+```
+
+# Model 2 - microbes + covariates
+## Load metagenomeSeq data
+```{r}
+# load phyloseq object
+ps.f <- readRDS(file = here("data/phyloseq/ps_healthy_css.rds"))
+
+# Extract sample names from the phyloseq object
+sample_ids <- sample_names(ps.f)
+metadata_subset <- metadata[metadata$run_accession %in% sample_ids, ]
+
+# # Subset metadata based on matching row names to css_counts column names
+# metadata_subset <- data.frame(sample_data(ps.f)) %>%
+#   mutate(sex = case_when(Infant_gender == 2 ~ 1,
+#                                    Infant_gender == 1 ~ 0))
+```
+
+
+## filter most differentially abundant taxa - modA unadjusted pval < 0.05 (sex & sex*ega interaction)
+
+### read in files
+```{r}
+all_pvals <- read.csv(file = here("data/metagenomeseq/all_samples_sex_ega_interaction_pvalues.csv"), row.names = 1)
+all_coefs <- read.csv(file = here("data/metagenomeseq/all_samples_sex_ega_interaction_foldchange.csv"), row.names = 1)
+```
+
+### prep data
+```{r}
+# calculate adjusted p-values using FDR
+#########################################
+adj_pvals <- as.data.frame(lapply(all_pvals, function(column) p.adjust(column, method = "fdr")))
+row.names(adj_pvals) <- row.names(all_pvals)
+
+# subset significant sex and sex*ega associated adj pvals
+#########################################
+sex_pvals <- adj_pvals %>%
+  filter(sex1 < 0.05)
+
+# Subset the dataframe to keep only the "sex1" column and retain row names
+sex_df <- sex_pvals[, "sex1", drop = FALSE] %>%
+  dplyr::rename(qval = sex1)
+
+# subset all_coefs with sex_pvals
+sex_coefs <- all_coefs[rownames(sex_pvals), "sex1", drop = FALSE] %>%
+  dplyr::rename(coef = sex1)
+
+
+sex_df <- cbind(sex_coefs, sex_df)
+
+# subset_taxa <- input_taxa[row.names(sex_df), , drop = FALSE]
+# 
+# sex_df <- cbind(sex_df, subset_taxa)
+
+# subset significant sex*ega associated adj pvals
+#########################################
+sex_ega_pvals <- adj_pvals %>%
+  filter(sex1.ega < 0.05)
+
+# Subset the dataframe to keep only the "sex1" column and retain row names
+sex_ega_df <- sex_ega_pvals[, "sex1.ega", drop = FALSE] %>%
+  dplyr::rename(qval = sex1.ega)
+
+# subset all_coefs with sex_pvals
+sex_ega_coefs <- all_coefs[rownames(sex_ega_pvals), "sex1.ega", drop = FALSE] %>%
+  dplyr::rename(coef = sex1.ega)
+
+
+sex_ega_df <- cbind(sex_ega_coefs, sex_ega_df)
+
+sig_sex_taxa <- rownames(rbind(sex_df, sex_ega_df))
+
+# subset_taxa <- input_taxa[row.names(sex_ega_df), , drop = FALSE]
+# 
+# sex_ega_df <- cbind(sex_ega_df, subset_taxa)
+
+ps_ml <- prune_taxa(sig_sex_taxa, ps.f)
+
+# Extract metadata and set new sample names from "SampleID" column
+sample_data(ps_ml)$SampleID <- as.character(sample_data(ps_ml)$SampleID)  # Ensure SampleID is character
+sample_names(ps_ml) <- sample_data(ps_ml)$SampleID
+
+ps_ml
+```
+
+```{r}
+ml_asvs <- data.frame(otu_table(ps_ml))
+
+
+# Replace zeros with a small pseudocount
+pseudocount <- min(ml_asvs[ml_asvs > 0]) / 2
+ml_asvs[ml_asvs == 0] <- pseudocount
+
+# CLR transform (apply by row)
+clr_counts <- apply(ml_asvs, 1, compositions::clr)
+
+# Convert back to data frame (optional)
+clr_counts <- as.data.frame(clr_counts)
+
+clr_counts$SampleID <- rownames(clr_counts)
+```
+
+
+```{r}
+# read in covariate model
+covariate_model <- read.csv(file = here("data/ML/model1_covariates.csv"), row.names = 1)
+
+covariate_model$SampleID <- rownames(covariate_model)
+
+# Ensure both datasets have a common column for merging (e.g., "SampleID")
+clr_counts <- clr_counts %>%
+  full_join(covariate_model, by = "SampleID")
+
+rownames(clr_counts) <- clr_counts$SampleID
+
+clr_counts <- clr_counts %>%
+  dplyr::select(-SampleID)
+
+write.csv(clr_counts, file = here("data/ML/model2_asvs_covariates.csv"))
+```
+
+### Corrected counts
+```{r}
+ml_asvs <- data.frame(otu_table(ps_ml))
+```
+
+
+```{r}
+# Convert wide data (ASVs as rows, Samples as columns) to long format
+css_counts_long <- data.frame(ml_asvs) %>%
+  rownames_to_column(var = "ASV") %>%  # Convert row names (ASV IDs) into a column
+  pivot_longer(cols = -ASV, names_to = "Sample", values_to = "Count")  # Reshape data
+
+# View the transformed data
+head(css_counts_long)
+
+```
+```{r}
+for (asv in unique(css_counts_long$ASV)) {
+  p <- ggplot(subset(css_counts_long, ASV == asv), aes(x = Count)) +
+    geom_histogram(binwidth = 1, fill = "blue", alpha = 0.7, color = "black") +
+    labs(title = paste("Distribution of ASV:", asv),
+         x = "ASV Count",
+         y = "Frequency") +
+    theme_minimal()
+  
+  print(p)  # Display plot instead of saving
+  Sys.sleep(1)  # Pause to view each plot before the next appears
+}
+
+
+```
+
+
+
+
+
+
+```{r}
+# Make LIMON object
+test1 <- LIMON_Obj(Counts = as.matrix(t(ml_asvs)), 
+                           SampleData = metadata_subset)
+
+# Set seed
+set.seed(12345)
+# Fit the distribution/remove covariates
+#########################################
+test2 <- LIMON_DistrFit(Obj = test1, 
+                           Time = "Time", 
+                           Subject = "run_accession", 
+                           Covariates = c("Gestation_week", "Residence", "Parity"),
+                           model = "Gestation_week + Residence + Parity",
+                           distribution = "GLMM.Z")
+```
+#### Look at distribution of ASV counts
+```{r}
+# Convert wide data (ASVs as rows, Samples as columns) to long format
+css_counts_long <- data.frame(t(test2[["Corrected_Counts"]])) %>%
+  rownames_to_column(var = "ASV") %>%  # Convert row names (ASV IDs) into a column
+  pivot_longer(cols = -ASV, names_to = "Sample", values_to = "Count")  # Reshape data
+
+# View the transformed data
+head(css_counts_long)
+
+```
+```{r}
+for (asv in unique(css_counts_long$ASV)) {
+  p <- ggplot(subset(css_counts_long, ASV == asv), aes(x = Count)) +
+    geom_histogram(binwidth = 1, fill = "blue", alpha = 0.7, color = "black") +
+    labs(title = paste("Distribution of ASV:", asv),
+         x = "ASV Count",
+         y = "Frequency") +
+    theme_minimal()
+  
+  print(p)  # Display plot instead of saving
+  Sys.sleep(1)  # Pause to view each plot before the next appears
+}
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+# extract corrected count table from LIMON object
+corrected_counts <- data.frame(t(test2[["Corrected_Counts"]]))
+
+pseudocount <- min(corrected_counts[corrected_counts > 0]) / 2
+corrected_counts[corrected_counts == 0] <- pseudocount
+
+# CLR transform (apply by row)
+clr_counts <- apply(corrected_counts, 1, compositions::clr)
+
+# Convert back to data frame (optional)
+clr_counts <- as.data.frame(clr_counts)
+
+clr_counts$SampleID <- rownames(clr_counts)
+
+# Ensure both datasets have a common column for merging (e.g., "SampleID")
+clr_counts <- clr_counts %>%
+  left_join(metadata_subset %>% dplyr::select(SampleID, sex), by = "SampleID")
+
+rownames(clr_counts) <- clr_counts$SampleID
+
+clr_counts <- clr_counts %>%
+  dplyr::select(-SampleID)
+
+write.csv(clr_counts, file = here("data/ML/ASVs_sex_corrected_p05.csv"))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Model 3 - enzymes + covariates
+## Raw counts
+
+
+### CLR transforming using compositions
+```{r}
+## To keep dataset transformations consistent for enzymes and ASVs, we will subset the raw picrust data to include only features of interest and then clr transform that
+
+# load KO file
+picrust.kegg <- read.csv(file = here("data/picrust2/picrust2_out_pipeline/KO_metagenome_out/pred_metagenome_unstrat.tsv"),
+                         sep = "\t", row.names = 1)
+
+all_maaslin <- read.csv(file = here("data/maaslin2/all_samples_kegg_sex_ega_interaction_clr_compositions_033125/all_results.tsv"), sep = "\t")
+# sex_05 <- all_maaslin %>%
+#   filter(pval < 0.05) %>%
+#   filter(metadata %in% c("Infant_gender", "sex_ega"))
+
+sex_05 <- all_maaslin %>%
+  filter(pval < 0.05) %>%
+  filter(metadata %in% "Infant_gender")
+
+selected_kegg_ids <- sex_05$feature
+
+css_filtered <- data.frame(t(picrust.kegg))
+# Filter the phyloseq object to keep only the top taxa
+css_filtered <- css_filtered[ ,selected_kegg_ids]
+```
+
+
+```{r}
+# transpose css_filtered so KEGGs are rows and samples are columns
+css_filtered <- t(css_filtered)
+# Replace zeros with a small pseudocount
+pseudocount <- min(css_filtered[css_filtered > 0]) / 2
+css_filtered[css_filtered == 0] <- pseudocount
+
+# CLR transform (apply by row)
+clr_counts <- apply(css_filtered, 1, compositions::clr)
+
+# Convert back to data frame (optional)
+clr_counts <- as.data.frame(clr_counts)
+
+clr_counts$SampleID <- rownames(clr_counts)
+
+# read in covariate model
+covariate_model <- read.csv(file = here("data/ML/model1_covariates.csv"), row.names = 1)
+
+covariate_model$SampleID <- rownames(covariate_model)
+
+# Ensure both datasets have a common column for merging (e.g., "SampleID")
+clr_counts <- clr_counts %>%
+  left_join(covariate_model, by = "SampleID")
+
+rownames(clr_counts) <- clr_counts$SampleID
+
+clr_counts <- clr_counts %>%
+  dplyr::select(-SampleID)
+
+write.csv(clr_counts, file = here("data/ML/model3_enzymes_covariates.csv"))
+```
+
+
+### Corrected counts
+```{r}
+# load KO file
+picrust.kegg <- read.csv(file = here("data/picrust2/picrust2_out_pipeline/KO_metagenome_out/pred_metagenome_unstrat.tsv"),
+                         sep = "\t", row.names = 1)
+
+all_maaslin <- read.csv(file = here("data/maaslin2/all_samples_kegg_sex_ega_interaction_clr_compositions_033125/all_results.tsv"), sep = "\t")
+# sex_05 <- all_maaslin %>%
+#   filter(pval < 0.05) %>%
+#   filter(metadata %in% c("Infant_gender", "sex_ega"))
+
+sex_05 <- all_maaslin %>%
+  filter(pval < 0.05) %>%
+  filter(metadata %in% "Infant_gender")
+
+selected_kegg_ids <- sex_05$feature
+
+css_filtered <- data.frame(t(picrust.kegg))
+# Filter the phyloseq object to keep only the top taxa
+css_filtered <- css_filtered[ ,selected_kegg_ids]
+# 
+# css_filtered$SampleID <- rownames(css_filtered)
+```
+
+
+```{r}
+# Convert wide data (ASVs as rows, Samples as columns) to long format
+css_counts_long <- data.frame(t(css_filtered)) %>%
+  rownames_to_column(var = "ASV") %>%  # Convert row names (ASV IDs) into a column
+  pivot_longer(cols = -ASV, names_to = "Sample", values_to = "Count")  # Reshape data
+
+# View the transformed data
+head(css_counts_long)
+
+```
+```{r}
+for (asv in unique(css_counts_long$ASV)) {
+  p <- ggplot(subset(css_counts_long, ASV == asv), aes(x = Count)) +
+    geom_histogram(binwidth = 1, fill = "blue", alpha = 0.7, color = "black") +
+    labs(title = paste("Distribution of ASV:", asv),
+         x = "ASV Count",
+         y = "Frequency") +
+    theme_minimal()
+  
+  print(p)  # Display plot instead of saving
+  Sys.sleep(1)  # Pause to view each plot before the next appears
+}
+
+
+```
+
+```{r}
+# Make LIMON object
+test1 <- LIMON_Obj(Counts = as.matrix(css_filtered), 
+                           SampleData = metadata_subset)
+
+# Set seed
+set.seed(12345)
+# Fit the distribution/remove covariates
+#########################################
+test2 <- LIMON_DistrFit(Obj = test1, 
+                           Time = "Time", 
+                           Subject = "run_accession", 
+                           Covariates = c("Gestation_week", "Residence", "Parity"),
+                           model = "Gestation_week + Residence + Parity",
+                           distribution = "GLMM.NB")
+```
+
+#### Look at distribution of ASV counts
+```{r}
+# Convert wide data (ASVs as rows, Samples as columns) to long format
+css_counts_long <- data.frame(t(test2[["Corrected_Counts"]])) %>%
+  rownames_to_column(var = "ASV") %>%  # Convert row names (ASV IDs) into a column
+  pivot_longer(cols = -ASV, names_to = "Sample", values_to = "Count")  # Reshape data
+
+# View the transformed data
+head(css_counts_long)
+
+```
+```{r}
+for (asv in unique(css_counts_long$ASV)) {
+  p <- ggplot(subset(css_counts_long, ASV == asv), aes(x = Count)) +
+    geom_histogram(binwidth = 1, fill = "blue", alpha = 0.7, color = "black") +
+    labs(title = paste("Distribution of ASV:", asv),
+         x = "ASV Count",
+         y = "Frequency") +
+    theme_minimal()
+  
+  print(p)  # Display plot instead of saving
+  Sys.sleep(1)  # Pause to view each plot before the next appears
+}
+
+
+```
+```{r}
+# extract corrected count table from LIMON object
+corrected_counts <- data.frame(test2[["Corrected_Counts"]])
+
+pseudocount <- min(corrected_counts[corrected_counts > 0]) / 2
+corrected_counts[corrected_counts == 0] <- pseudocount
+
+# CLR transform (apply by row)
+clr_counts <- t(apply(corrected_counts, 1, compositions::clr))
+
+# Convert back to data frame (optional)
+clr_counts <- as.data.frame(clr_counts)
+
+clr_counts$SampleID <- rownames(clr_counts)
+
+# Ensure both datasets have a common column for merging (e.g., "SampleID")
+clr_counts <- clr_counts %>%
+  left_join(metadata_subset %>% dplyr::select(SampleID, sex), by = "SampleID")
+
+rownames(clr_counts) <- clr_counts$SampleID
+
+clr_counts <- clr_counts %>%
+  dplyr::select(-SampleID)
+
+write.csv(clr_counts, file = here("data/ML/KEGGs_sex_corrected_p05.csv"))
+```
+
+
+
+
+# Model 4 - combine microbes & enzymes
+## Uncorrected counts
+```{r}
+asvs <- read.csv(file = here("data/ML/model2_asvs_covariates.csv"), row.names = 1)
+keggs <- read.csv(file = here("data/ML/model3_enzymes_covariates.csv"), row.names = 1)
+
+asvs <- asvs[,!(colnames(asvs) %in% c("sex", "Gestation_week", "Age", "BMI_before_pregnancy", "Residence", "Parity"))]
+
+
+asvs$SampleID <- rownames(asvs)
+
+keggs$SampleID <- rownames(keggs)
+
+# Merge dataframes by "SampleID" and keep only one "sex" column
+combined_df <- full_join(asvs, keggs, by = "SampleID") %>%
+  # dplyr::rename(sex = sex.y) %>%       # Rename "sex.x" back to "sex"
+  # dplyr::select(-sex.x) %>%
+  column_to_rownames(var = "SampleID")
+
+# View the merged dataframe
+head(combined_df)
+
+write.csv(combined_df, file = here("data/ML/model4_combined.csv"))
+```
+
+
+## Corrected counts
+```{r}
+keggs <- read.csv(file = here("data/ML/KEGGs_sex_corrected_p05.csv"), row.names = 1)
+keggs$SampleID <- rownames(keggs)
+
+asvs <- read.csv(file = here("data/ML/ASVs_sex_corrected_p05.csv"), row.names = 1)
+asvs$SampleID <- rownames(asvs)
+
+# Merge dataframes by "SampleID" and keep only one "sex" column
+combined_df <- full_join(asvs, keggs, by = "SampleID") %>%
+  dplyr::rename(sex = sex.y) %>%       # Rename "sex.x" back to "sex"
+  dplyr::select(-sex.x) %>%
+  column_to_rownames(var = "SampleID")
+
+# View the merged dataframe
+head(combined_df)
+
+write.csv(combined_df, file = here("data/ML/combined_sex_corrected_p05.csv"))
+```

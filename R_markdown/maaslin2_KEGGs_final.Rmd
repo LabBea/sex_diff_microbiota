@@ -1,0 +1,685 @@
+---
+title: "maaslin2 KEGG - final"
+author: "Blake Williams"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: yes
+    df_print: paged
+  pdf_document: default
+  html_notebook:
+    toc: yes
+---
+
+# Prep workspace
+## Load packages
+```{r setup, include=FALSE}
+library(here)
+library(phyloseq)
+library(ggplot2)
+library(tidyverse)
+library(Biostrings)
+library(vegan)
+library(readxl)
+library(metagenomeSeq)
+library(compositions)
+library(Maaslin2)
+library(ggpubr)
+library(quantreg)
+library(readxl)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# KEGG
+## Load data
+```{r}
+# # load pathways file
+# picrust.pathways <- read.csv(file = here("data/picrust2/picrust2_out_pipeline/pathways_out/path_abun_unstrat.tsv"),
+#                              sep = "\t", row.names = 1)
+
+# load KO file
+picrust.kegg <- read.csv(file = here("data/picrust2/picrust2_out_pipeline/KO_metagenome_out/pred_metagenome_unstrat.tsv"),
+                         sep = "\t", row.names = 1)
+
+# # load mapfile - I think this has the enzymes that belong to each pathway
+# picrust.mapfile <- read.csv(file = here("data/picrust2/picrust2_out_pipeline/intermediate/pathways/parsed_mapfile.tsv"),
+#                             sep = " ", header = FALSE)
+```
+
+```{r}
+## Load phylseq object
+ps.f <- readRDS(file = here("data/phyloseq/ps_healthy_filtered_010325.rds"))
+
+input_meta <- data.frame(sample_data(ps.f)) %>%
+  mutate(Infant_gender = case_when(Infant_gender == 2 ~ 1,
+                                   Infant_gender == 1 ~ 0)) %>%
+  mutate(sex_ega = Infant_gender*Gestation_week)
+
+rownames(input_meta) <- input_meta$SampleID
+```
+
+## maaslin2 prevalence and abundance filtering
+```{r}
+min_prevalence <- 0.90
+min_abundance <- 0.90
+
+unfiltered_data <- t(picrust.kegg)
+unfiltered_metadata <- input_meta
+ # require at least total samples * min prevalence values 
+        # for each feature to be greater than min abundance
+
+total_samples <- nrow(unfiltered_data)
+min_samples <- total_samples * min_prevalence
+
+# Filter by abundance using zero as value for NAs
+data_zeros <- unfiltered_data
+data_zeros[is.na(data_zeros)] <- 0
+filtered_data <-
+            data.frame(unfiltered_data[, 
+                colSums(data_zeros > min_abundance) > min_samples,
+                drop = FALSE])
+total_filtered_features <-
+            ncol(unfiltered_data) - ncol(filtered_data)
+```
+
+```{r}
+kegg_matrix <- as.matrix(t(filtered_data))
+
+# # Replace zeros with a small pseudocount
+pseudocount <- min(kegg_matrix[kegg_matrix > 0]) / 2
+kegg_matrix[kegg_matrix == 0] <- pseudocount
+#
+# # CLR transform each KEGG pathway
+clr_transformed <- t(apply(kegg_matrix, 1, compositions::clr))
+#
+# # Convert back to data frame (optional)
+clr_transformed <- as.data.frame(clr_transformed)
+
+write.csv(clr_transformed, file = here("data/maaslin2/clr_transformed_final.csv"))
+```
+
+
+## Pre-filtered count matrix
+```{r}
+## Fit data
+fit_data <- Maaslin2(
+  input_data = clr_transformed,
+  input_metadata = input_meta,
+  min_abundance = 0,
+  min_prevalence = 0,
+  normalization = "NONE",
+  transform = "NONE",
+  standardize = FALSE,
+  analysis_method = "LM",
+  output = here("data/maaslin2/all_samples_kegg_sex_ega_interaction_clr_compositions_033125"),
+  fixed_effects = c("Infant_gender"
+                    , "Age"
+                    , "BMI_before_pregnancy"
+                    , "Parity"
+                    , "Residency_status"
+                    , "Gestation_week"
+                    , "sex_ega"
+                    ),
+  cores = 4
+)
+```
+
+
+
+
+
+## Plot significant KEGGs
+### All samples
+#### Infant gender associated KOs
+```{r}
+## Load phylseq object
+ps.f <- readRDS(file = here("data/phyloseq/ps_healthy_filtered.rds"))
+
+# load clr transformed picrust counts
+filtered_clr <- read.csv(file = here("data/maaslin2/clr_transformed_final.csv"), row.names = 1)
+
+# load maaslin2 results
+all_maaslin <- read.csv(file = here("data/maaslin2/all_samples_kegg_sex_ega_interaction_clr_compositions_033125/significant_results.tsv"), sep = "\t")
+
+input_meta <- data.frame(sample_data(ps.f)) %>%
+  mutate(Infant_gender = case_when(Infant_gender == 2 ~ 1,
+                                   Infant_gender == 1 ~ 0)) %>%
+  mutate(sex_ega = Infant_gender*Gestation_week)
+
+
+rownames(input_meta) <- input_meta$SampleID
+
+ps_kegg <- phyloseq(sample_data(input_meta),
+                    otu_table(filtered_clr, taxa_are_rows = TRUE)
+                    )
+```
+
+
+
+```{r}
+all_sig_sex <- all_maaslin %>%
+  filter(qval < 0.25) %>%
+  filter(metadata == "Infant_gender")
+
+selected_kegg_ids <- all_sig_sex$feature
+```
+
+```{r, warning=FALSE}
+subset_counts <- picrust.kegg[rownames(picrust.kegg) %in% selected_kegg_ids, ]
+
+# Transpose count data and convert to a long format
+counts_long <- subset_counts %>% 
+  rownames_to_column(var = "KEGG_ID") %>%
+  pivot_longer(cols = -KEGG_ID, names_to = "SampleID", values_to = "Count")
+
+# Merge with metadata
+data_merged <- merge(counts_long, input_meta, by = "SampleID")
+
+# Plot using geom_smooth
+ggplot(data_merged, aes(x = Gestation_week, y = Count, color = KEGG_ID, fill = KEGG_ID)) +
+  geom_smooth(method = "loess", span = 0.75, se = TRUE, alpha = 0.3) +
+  facet_wrap(~ KEGG_ID, scales = "free_y") +  # Create a plot for each KEGG ID
+  labs(title = "KEGG ID Trends Over Gestation Weeks - All Samples",
+       x = "Gestation Week",
+       y = "Relative Abundance (Counts)",
+       color = "KEGG ID",
+       fill = "KEGG ID") +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "italic"))
+```
+
+
+```{r}
+# Subset the KEGG IDs
+subset_counts <- filtered_clr[rownames(filtered_clr) %in% selected_kegg_ids, ]
+
+# Transpose count data and convert to long format
+counts_long <- subset_counts %>% 
+  rownames_to_column(var = "KEGG_ID") %>%
+  pivot_longer(cols = -KEGG_ID, names_to = "SampleID", values_to = "Count")
+
+# Merge with metadata
+data_merged <- merge(counts_long, input_meta, by = "SampleID")
+
+# Convert Infant_gender to a factor for proper legend labeling
+data_merged$Infant_gender <- as.factor(data_merged$Infant_gender)
+
+cols <- c("0" = "#50B93A", "1" = "#9C7FB9")
+
+# Plot with separate smoothed lines for each Infant_gender
+ggplot(data_merged, aes(x = Gestation_week, y = Count, color = Infant_gender, fill = Infant_gender)) +
+  geom_smooth(method = "loess", span = 0.75, se = TRUE, alpha = 0.3) +  # Separate smooth lines by gender
+  facet_wrap(~ KEGG_ID, scales = "free_y") +  # Create a plot for each KEGG ID
+  scale_color_manual(values = cols, labels = c("Male", "Female")) +  # Set colors for gender
+  scale_fill_manual(values = cols, guide = "none") +  # Remove fill legend
+  labs(title = "KEGG ID Trends Over Gestation Weeks - All Samples",
+       x = "Gestation Week",
+       y = "CLR Transformed Counts",
+       color = "Fetal Sex") +  # Keep only the color legend
+  theme_minimal() +
+  theme(strip.text = element_text(face = "italic"))
+```
+
+
+
+<!-- ## Remove covariate effects from count data -->
+<!-- ```{r} -->
+<!-- # input_meta_filt <- input_meta %>% -->
+<!-- #   dplyr::select(Gestation_week, Parity, Residency_status) %>% -->
+<!-- #   mutate(Gestation_week = scale(Gestation_week)) %>% -->
+<!-- #   mutate(Parity = scale(Parity)) %>% -->
+<!-- #   mutate(Residency_status = as.numeric(Residency_status)) -->
+<!-- #  -->
+<!-- # # Extract beta coefficients -->
+<!-- # beta_coefficients <- all_maaslin %>% dplyr::select(feature, metadata, coef) -->
+<!-- #  -->
+<!-- # # View the beta coefficients -->
+<!-- # head(beta_coefficients) -->
+<!-- #  -->
+<!-- # beta_matrix <- beta_coefficients %>% -->
+<!-- #   pivot_wider(names_from = metadata, values_from = coef) %>% -->
+<!-- #   column_to_rownames("feature") -->
+<!-- #  -->
+<!-- # # Replace NA beta coefficients with 0 (so they do not affect calculations) -->
+<!-- # beta_matrix[is.na(beta_matrix)] <- 0 -->
+<!-- #  -->
+<!-- # beta_matrix <- as.matrix(beta_matrix) -->
+<!-- #  -->
+<!-- # # Ensure samples in metadata match count matrix columns -->
+<!-- # all(rownames(input_meta_filt) == rownames(filtered_clr)) -->
+<!-- #  -->
+<!-- # # Perform correction -->
+<!-- # corrected_counts <- as.matrix(t(filtered_clr)) -->
+<!-- #  -->
+<!-- # for (gene in rownames(corrected_counts)) { -->
+<!-- #   for (covariate in colnames(input_meta_filt)) { -->
+<!-- #     if (gene %in% rownames(beta_matrix) && covariate %in% colnames(beta_matrix)) { -->
+<!-- #       corrected_counts[gene, ] <- corrected_counts[gene, ] - beta_matrix[gene, covariate] * input_meta_filt[, covariate] -->
+<!-- #     } -->
+<!-- #   } -->
+<!-- # } -->
+<!-- #  -->
+<!-- # # Save corrected counts -->
+<!-- # # write.table(corrected_counts, here("data/maaslin2/corrected_counts.tsv"), sep = "\t", quote = FALSE, col.names = NA) -->
+<!-- ``` -->
+
+
+<!-- ```{r} -->
+<!-- subset_counts <- data.frame(corrected_counts[rownames(corrected_counts) %in% selected_kegg_ids, ]) -->
+
+<!-- # Transpose count data and convert to long format -->
+<!-- counts_long <- subset_counts %>%  -->
+<!--   rownames_to_column(var = "KEGG_ID") %>% -->
+<!--   pivot_longer(cols = -KEGG_ID, names_to = "SampleID", values_to = "Count") -->
+
+<!-- # Merge with metadata -->
+<!-- data_merged <- merge(counts_long, input_meta, by = "SampleID") -->
+
+<!-- # Convert Infant_gender to a factor for proper legend labeling -->
+<!-- data_merged$Infant_gender <- as.factor(data_merged$Infant_gender) -->
+
+<!-- cols <- c("0" = "#50B93A", "1" = "#9C7FB9") -->
+<!-- ``` -->
+
+
+<!-- ```{r} -->
+<!-- # Plot with separate smoothed lines for each Infant_gender -->
+<!-- ggplot(data_merged, aes(x = Gestation_week, y = Count, color = Infant_gender, fill = Infant_gender)) + -->
+<!--   geom_smooth(method = "loess", span = 0.75, se = TRUE, alpha = 0.3) +  # Separate smooth lines by gender -->
+<!--   facet_wrap(~ KEGG_ID, scales = "free_y") +  # Create a plot for each KEGG ID -->
+<!--   scale_color_manual(values = cols, labels = c("Male", "Female")) +  # Set colors for gender -->
+<!--   scale_fill_manual(values = cols, guide = "none") +  # Remove fill legend -->
+<!--   labs(title = "KEGG ID Trends Over Gestation Weeks - All Samples", -->
+<!--        x = "Gestation Week", -->
+<!--        y = "CLR Transformed Counts", -->
+<!--        color = "Fetal Sex") +  # Keep only the color legend -->
+<!--   theme_minimal() + -->
+<!--   theme(strip.text = element_text(face = "italic")) -->
+<!-- # Create violin plot -->
+<!-- cols <- c("0" = "#50B93A", "1" = "#9C7FB9") -->
+<!-- ggplot(data_merged, aes(x = as.factor(Infant_gender), y = Count, fill = as.character(Infant_gender))) + -->
+<!--   geom_violin(trim = FALSE) +  # Violin plot with transparency -->
+<!--   geom_jitter(width = 0.2, alpha = 0.3) +       # Add jittered points for better visualization -->
+<!--   stat_summary(fun = mean, geom = "crossbar", width = 0.5, color = "black") +  # Median line -->
+<!--   facet_wrap(~ KEGG_ID, scales = "free_y") + -->
+<!--   scale_fill_manual(values = cols, labels = c("Male", "Female")) + -->
+<!--   scale_x_discrete(labels = c("0" = "Male", "1" = "Female")) + -->
+<!--   labs(title = "Distribution of Pentose.P.Pwy by Infant Gender", -->
+<!--        x = "Infant Gender", -->
+<!--        y = "Pentose.P.Pwy") +  -->
+<!--   theme_minimal() + -->
+<!--   theme( -->
+<!--     text = element_text(size = 16),  # Increases all text size -->
+<!--     axis.text = element_text(size = 14),  # Axis tick labels -->
+<!--     axis.title = element_text(size = 16),  # Axis titles -->
+<!--     strip.text = element_text(size = 16),  # Facet labels (if used) -->
+<!--     legend.text = element_text(size = 14),  # Legend text -->
+<!--     legend.title = element_text(size = 14)  # Legend title -->
+<!--   ) + -->
+<!--   theme(legend.position = "none")  # Remove legend if needed -->
+<!-- ``` -->
+
+
+# Graphing significant associations
+
+## Load data
+```{r}
+# load maaslin data
+all_maaslin <- read.csv(file = here("data/maaslin2/all_samples_kegg_sex_ega_interaction_clr_compositions_033125/significant_results.tsv"), sep = "\t")
+# female_maaslin <- read.csv(file = here("data/maaslin2/female_samples_ega_033125/significant_results.tsv"), sep = "\t")
+# male_maaslin <- read.csv(file = here("data/maaslin2/female_samples_ega_033125/all_results.tsv"), sep = "\t")
+
+# load kegg info
+kegg_all_sex <- read.csv(file = here("data/maaslin2/kegg/kegg_info_df_sex_all_samples_033125.csv"), row.names = 1)
+
+kegg_all_ega <- read.csv(file = here("data/maaslin2/kegg/kegg_info_df_ega_all_samples_033125.csv"), row.names = 1)
+  
+kegg_all_sex_ega <- read.csv(file = here("data/maaslin2/kegg/kegg_info_df_sex_ega_all_samples_033125.csv"), row.names = 1)
+
+
+# kegg_female_ega <- read.csv(file = here("data/maaslin2/kegg/kegg_info_df_ega_female_samples.csv"), row.names = 1)
+```
+
+```{r}
+# rename entry column in kegg info df to feature
+kegg_all_sex <- kegg_all_sex %>%
+  dplyr::rename(feature = ENTRY)
+
+kegg_all_ega <- kegg_all_ega %>%
+  dplyr::rename(feature=ENTRY)
+
+kegg_all_sex_ega <- kegg_all_sex_ega %>%
+  dplyr::rename(feature=ENTRY)
+
+# kegg_female_ega <- kegg_female_ega %>%
+#   dplyr::rename(feature=entry)
+```
+
+## sex - all samples
+```{r}
+# filter by sex
+maaslin.sex <- all_maaslin %>%
+  subset(metadata == "Infant_gender")
+
+maaslin.sex <- merge(maaslin.sex, kegg_all_sex, by = "feature")
+
+# write.csv(maaslin.sex, file = here("data/maaslin2/figure_dfs/sex_all_samples.csv"))
+```
+
+```{r}
+# maaslin.sex <- read.csv(file = here("data/maaslin2/figure_dfs/sex_all_samples.csv"))
+
+maaslin.sex$SYMBOL <- factor(maaslin.sex$SYMBOL,
+                              maaslin.sex$SYMBOL[order(maaslin.sex$qval)], ordered=T)
+maaslin.sex$just <- ifelse(maaslin.sex$coef < 0,0,1)
+
+# Order by fold change
+maaslin.sex$SYMBOL = with(maaslin.sex, reorder(SYMBOL, coef, median))
+
+cols <- c("0" = "#50B93A", "1" = "#9C7FB9")
+
+ggplot(maaslin.sex, aes(x=SYMBOL, y=coef, fill=as.character(just))) +
+  geom_bar(stat="identity") +
+  scale_y_continuous("Fold change", limits = c(-.25, .25), position="left") +
+  scale_x_discrete("", labels = NULL) +
+  scale_fill_manual(values = cols, labels = NULL) +
+  # scale_fill_gradient2(low="#8C6BB1",mid = "#8C96C6", high="#E0ECF4", midpoint=mean(range(maaslin.sex$qval)),
+  #                       limits=range(maaslin.sex$qval), SYMBOL = "Adjusted p-value") +
+  coord_flip() +
+  theme_minimal()+
+  theme(legend.position = "none", axis.title = element_text(size = 20),
+        axis.text = element_text(size = 15)) +
+  geom_text(aes(x=SYMBOL, y=0, label=SYMBOL), hjust=maaslin.sex$just)
+```
+## EGA - all samples
+```{r}
+# filter by sex
+maaslin.ega <- all_maaslin %>%
+  subset(metadata == "Gestation_week")
+
+maaslin.ega <- merge(maaslin.ega, kegg_all_ega, by = "feature")
+
+# write.csv(maaslin.sex, file = here("data/maaslin2/figure_dfs/ega_all_samples.csv"))
+```
+
+```{r}
+#maaslin.ega <- read.csv(file = here("data/maaslin2/figure_dfs/ega_all_samples.csv"))
+
+maaslin.ega$SYMBOL <- factor(maaslin.ega$SYMBOL,
+                              maaslin.ega$SYMBOL[order(maaslin.ega$qval)], ordered=T)
+maaslin.ega$just <- ifelse(maaslin.ega$coef < 0,0,1)
+
+# Order by fold change
+maaslin.ega$SYMBOL = with(maaslin.ega, reorder(SYMBOL, coef, median))
+
+cols <- c("0" = "#50B93A", "1" = "#9C7FB9")
+
+ggplot(maaslin.ega, aes(x=SYMBOL, y=coef, fill=as.character(just))) +
+  geom_bar(stat="identity") +
+  scale_y_continuous("Fold change", limits = c(-.5, .2), position="left") +
+  scale_x_discrete("", labels = NULL) +
+  scale_fill_manual(values = cols, labels = NULL) +
+  # scale_fill_gradient2(low="#8C6BB1",mid = "#8C96C6", high="#E0ECF4", midpoint=mean(range(maaslin.ega$qval)),
+  #                       limits=range(maaslin.ega$qval), SYMBOL = "Adjusted p-value") +
+  coord_flip() +
+  theme_minimal()+
+  theme(legend.position = "none", axis.title = element_text(size = 20),
+        axis.text = element_text(size = 15)) +
+  geom_text(aes(x=SYMBOL, y=0, label=SYMBOL), hjust=maaslin.ega$just)
+```
+
+## sex*ega - all samples
+```{r}
+# filter by sex
+maaslin.sex_ega <- all_maaslin %>%
+  subset(metadata == "sex_ega")
+
+maaslin.sex_ega <- merge(maaslin.sex_ega, kegg_all_sex_ega, by = "feature")
+
+# write.csv(maaslin.sex, file = here("data/maaslin2/figure_dfs/sex_ega_all_samples.csv"))
+```
+
+```{r}
+#maaslin.sex_ega <- read.csv(file = here("data/maaslin2/figure_dfs/sex_ega_all_samples.csv"))
+maaslin.sex_ega$SYMBOL <- factor(maaslin.sex_ega$SYMBOL,
+                              maaslin.sex_ega$SYMBOL[order(maaslin.sex_ega$qval)], ordered=T)
+maaslin.sex_ega$just <- ifelse(maaslin.sex_ega$coef < 0,0,1)
+
+# Order by fold change
+maaslin.sex_ega$SYMBOL = with(maaslin.sex_ega, reorder(SYMBOL, coef, median))
+
+cols <- c("0" = "#50B93A", "1" = "#9C7FB9")
+
+ggplot(maaslin.sex_ega, aes(x=SYMBOL, y=coef, fill=as.character(just))) +
+  geom_bar(stat="identity") +
+  scale_y_continuous("Fold change", limits = c(-.5, .5), position="left") +
+  scale_x_discrete("", labels = NULL) +
+  scale_fill_manual(values = cols, labels = NULL) +
+  # scale_fill_gradient2(low="#8C6BB1",mid = "#8C96C6", high="#E0ECF4", midpoint=mean(range(maaslin.sex_ega$qval)),
+  #                       limits=range(maaslin.sex_ega$qval), SYMBOL = "Adjusted p-value") +
+  coord_flip() +
+  theme_minimal()+
+  theme(legend.position = "none", axis.title = element_text(size = 20),
+        axis.text = element_text(size = 15)) +
+  geom_text(aes(x=SYMBOL, y=0, label=SYMBOL), hjust=maaslin.sex_ega$just)
+```
+
+```{r}
+all_sig_sex_ega <- all_maaslin %>%
+  filter(qval < 0.25) %>%
+  filter(metadata == "sex_ega")
+
+selected_kegg_ids <- all_sig_sex_ega$feature
+```
+
+```{r}
+# Subset the KEGG IDs
+subset_counts <- filtered_clr[rownames(filtered_clr) %in% selected_kegg_ids, ]
+
+# Transpose count data and convert to long format
+counts_long <- subset_counts %>% 
+  rownames_to_column(var = "KEGG_ID") %>%
+  pivot_longer(cols = -KEGG_ID, names_to = "SampleID", values_to = "Count")
+
+# Merge with metadata
+data_merged <- merge(counts_long, input_meta, by = "SampleID")
+
+# Convert Infant_gender to a factor for proper legend labeling
+data_merged$Infant_gender <- as.factor(data_merged$Infant_gender)
+
+cols <- c("0" = "#50B93A", "1" = "#9C7FB9")
+
+# Plot with separate smoothed lines for each Infant_gender
+ggplot(data_merged, aes(x = Gestation_week, y = Count, color = Infant_gender, fill = Infant_gender)) +
+  geom_smooth(method = "loess", span = 0.75, se = TRUE, alpha = 0.3) +  # Separate smooth lines by gender
+  facet_wrap(~ KEGG_ID, scales = "free_y") +  # Create a plot for each KEGG ID
+  scale_color_manual(values = cols, labels = c("Male", "Female")) +  # Set colors for gender
+  scale_fill_manual(values = cols, guide = "none") +  # Remove fill legend
+  labs(title = "KEGG ID Trends Over Gestation Weeks - All Samples",
+       x = "Gestation Week",
+       y = "CLR Transformed Counts",
+       color = "Fetal Sex") +  # Keep only the color legend
+  theme_minimal() +
+  theme(strip.text = element_text(face = "italic"))
+```
+
+
+
+
+```{r}
+maaslin.sex$Source <- "Sex"
+maaslin.ega$Source <- "EGA"
+maaslin.sex_ega$Source <- "Sex + EGA"
+maaslin_combined_df <- rbind(maaslin.sex, maaslin.ega, maaslin.sex_ega)
+
+
+# based on plots above, K11635 is significant by both EGA & sex*EGA - looking at the line plot above, it looks like there's a bimodal distribution for female fetuses while it decreases as gestation progresses for male fetuses - therefore, we'll keep the interaction effect but remove the EGA only effect
+maaslin_combined_df <- maaslin_combined_df %>%
+  dplyr::filter(!(metadata == "Gestation_week" & feature == "K11635"))
+
+write.csv(maaslin_combined_df, here("data/maaslin2/combined_df_all.csv"))
+```
+
+
+```{r}
+# Lollipop Plots for Differential Abundance
+maaslin_combined_df %>%
+  arrange(metadata, coef) %>%
+  mutate(SYMBOL = factor(SYMBOL, levels = unique(SYMBOL))) %>%
+  #arrange(coef) %>%
+  #mutate(plotnames = factor(plotnames)) %>% # Set order
+  ggplot(aes(x = SYMBOL, y = coef)) +
+    geom_segment(aes(x = SYMBOL, xend = SYMBOL, y = 0, yend = coef), color = "gray") +
+    geom_point(aes(color = as.factor(Source)), size = 6) + # Map color to Time_Level
+    coord_flip() +
+    theme_bw() +
+    xlab("") +
+    ylab("Fold Change") +
+    ggtitle("") +
+    scale_color_manual(values = c("Sex" = "#FDB462", "EGA" = "#8DD3C7", "Sex + EGA" = "#BC80BD"),
+                       name = "Feature")  +
+    theme(axis.text.x = element_text(color = "black", family = "Arial", size = 11),
+      axis.text.y = element_text(color = "black", family = "Arial", size = 11))
+```
+
+
+
+## Just sex and sex*ega interaction
+```{r}
+idx <- which(maaslin.ega$feature %in% maaslin.sex$feature)
+
+maaslin.ega.filtered <- maaslin.ega[idx, ]
+
+maaslin.sex$Source <- "Sex"
+maaslin.ega.filtered$Source <- "EGA"
+maaslin.sex_ega$Source <- "Sex + EGA"
+maaslin_combined_df <- rbind(maaslin.sex, maaslin.ega.filtered, maaslin.sex_ega)
+```
+
+
+```{r}
+# Lollipop Plots for Differential Abundance
+maaslin_combined_df %>%
+  arrange(metadata, coef) %>%
+  mutate(SYMBOL = factor(SYMBOL, levels = unique(SYMBOL))) %>%
+  #mutate(plotnames = factor(plotnames)) %>% # Set order
+  ggplot(aes(x = SYMBOL, y = coef)) +
+    geom_segment(aes(x = SYMBOL, xend = SYMBOL, y = 0, yend = coef), color = "gray") +
+    geom_point(aes(color = as.factor(Source)), size = 6) + # Map color to Time_Level
+    coord_flip() +
+    theme_bw() +
+    xlab("") +
+    ylab("Fold Change") +
+    ggtitle("") +
+    scale_color_manual(values = c("Sex" = "#FDB462",
+                                  "EGA" = "#8DD3C7", 
+                                  "Sex + EGA" = "#BC80BD"),
+                       name = "Feature")  +
+    theme(axis.text.x = element_text(color = "black", family = "Arial", size = 14),
+      axis.text.y = element_text(color = "black", family = "Arial", size = 14),
+      legend.text = element_text(size = 12),
+      legend.title = element_text(size = 14),
+      axis.title = element_text(size = 14))
+
+ggsave(here("data/maaslin2/figures/figure4.jpeg"), plot = last_plot(), dpi = 1200, width = 12, height = 6, units = "in", limitsize = FALSE)
+```
+
+```{r}
+# Lollipop Plots for Differential Abundance
+maaslin_combined_df %>%
+  arrange(metadata, coef) %>%
+  mutate(NAME = factor(NAME, levels = unique(NAME))) %>%
+  #mutate(plotnames = factor(plotnames)) %>% # Set order
+  ggplot(aes(x = NAME, y = coef)) +
+    geom_segment(aes(x = NAME, xend = NAME, y = 0, yend = coef), color = "gray") +
+    geom_point(aes(color = as.factor(Source)), size = 6) + # Map color to Time_Level
+    coord_flip() +
+    theme_bw() +
+    xlab("") +
+    ylab("Fold Change") +
+    ggtitle("") +
+    scale_color_manual(values = c("Sex" = "#FDB462",
+                                  "EGA" = "#8DD3C7", 
+                                  "Sex + EGA" = "#BC80BD"),
+                       name = "Feature")  +
+    theme(axis.text.x = element_text(color = "black", family = "Arial", size = 11),
+      axis.text.y = element_text(color = "black", family = "Arial", size = 11))
+
+#ggsave(here("data/maaslin2/figures/figure4.jpeg"), plot = last_plot(), dpi = 1200, width = 12, height = 6, units = "in", limitsize = FALSE)
+```
+
+
+
+```{r}
+write.csv(maaslin_combined_df, file = here("data/maaslin2/figure_dfs/maaslin_combined_df.csv"))
+```
+
+
+```{r}
+# library(MicrobiomeProfiler)
+# run_MicrobiomeProfiler()
+```
+
+
+```{r}
+# load in pathway data
+kegg_df <- read_xlsx(here("data/microbiomeProfiler/GSEA_fetalsex_final.xlsx"))
+
+# Convert GeneRatio from "X/XX" format to a numeric value
+kegg_df <- kegg_df %>%
+  separate(GeneRatio, into = c("num", "den"), sep = "/", convert = TRUE) %>%  # Split into two columns
+  mutate(GeneRatio = num / den) %>%  # Convert to numeric ratio
+  dplyr::select(-num, -den)  # Remove temporary columns
+```
+
+```{r}
+# Sample Plot
+ggplot(kegg_df, aes(x = GeneRatio, y = reorder(Description, GeneRatio))) +
+  geom_point(aes(size = Count, color = qvalue)) +
+  scale_color_gradient(low = "#8C47D7", high = "#619486", limits = c(0, 0.05), breaks = c(0.01, 0.03, 0.05)) +  # Color gradient based on qvalue
+  scale_size(range = c(3, 10)) +  # Adjust point sizes
+  theme_minimal() +
+  labs(x = "GeneRatio", y = "", color = "p.adjust", size = "Count", size = 10) +
+  theme(axis.text.y = element_text(size = 12))  # Increase y-axis text size
+
+ggsave(here("data/maaslin2/figures/figure4b.jpeg"), plot = last_plot(), dpi = 1200, width = 9, height = 5, units = "in", limitsize = FALSE)
+```
+
+
+```{r}
+# split KEGG ids by fetal sex association
+#############################################################
+kegg_df <- kegg_df
+fetal_sex <- read_excel(here("supp_files/microbiomeProfiler_sex_KOs_final.xlsx"), sheet = 1)
+
+# Step 1: Split geneID into multiple rows
+kegg_long <- kegg_df %>%
+  separate_rows(geneID, sep = "/")  # Split KEGG IDs into multiple rows
+
+# Step 2: Merge with fetal_sex to get the coefficients
+merged_df <- kegg_long %>%
+  left_join(fetal_sex, by = c("geneID" = "feature"))  # Match KEGG ID with coef
+
+# Step 3: Categorize KEGG IDs based on positive or negative coefficients
+kegg_separated <- merged_df %>%
+  mutate(category = ifelse(coef > 0, "positive", "negative")) %>%  # Label based on coef
+  group_by(ID) %>%  # Replace with the appropriate grouping column
+  summarise(
+    Positive_KEGGs = paste(geneID[category == "positive"], collapse = "/"),
+    Negative_KEGGs = paste(geneID[category == "negative"], collapse = "/")
+  )
+
+# Step 4: Merge back with the original dataset (if needed)
+final_df <- kegg_df %>%
+  left_join(kegg_separated, by = "ID")  # Replace with the correct column
+
+
+#write.csv(final_df, file = here("data/microbiomeProfiler/GSEA_fetalsex_split.csv"))
+```
+
+
+
+
+
+
+

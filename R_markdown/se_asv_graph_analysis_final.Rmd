@@ -1,0 +1,266 @@
+---
+title: "se_asv_graph_analysis"
+author: "Blake Williams"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# Load packages
+```{r setup, include=FALSE}
+library(here)
+library(dplyr)
+library(ggplot2)
+library(tidyverse)
+library(phyloseq)
+library(data.table)
+library(igraph)
+library(readxl)
+library(openxlsx)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Formatting tables from cytospace
+```{r}
+# female node table
+node_f <- read.csv(file = here("data/spiec-easi/microbes/Female(2) default node.csv"))
+
+# female edge table
+edge_f <- read.csv(file = here("data/spiec-easi/microbes/Female(2) default edge.csv"))
+
+# female node table
+node_m <- read.csv(file = here("data/spiec-easi/microbes/Male(2) default node.csv"))
+
+# female edge table
+edge_m <- read.csv(file = here("data/spiec-easi/microbes/Male(2) default edge.csv"))
+
+# female: Infant_gender == 2
+ps_female <- readRDS(file = here("data/spiec-easi/microbes/ps_female_asv.rds"))
+
+input_taxa <- as.data.frame(tax_table(ps_female))
+```
+
+```{r}
+colnames(node_f)
+node_f <- node_f[,c(10,12,19,3,8,17,9,25,20,1,5,4,11,18,23,7,26,6,2,14,15,16,21,27)]
+colnames(node_f)
+colnames(node_m)
+node_m <- node_m[,c(10,12,19,3,8,17,9,25,20,1,5,4,11,18,23,7,26,6,2,14,15,16,21,27)]
+colnames(node_m)
+
+colnames(edge_f)
+edge_f <- edge_f[,c(8,7,6,5,9,10,1,3,2)]
+colnames(edge_m)
+edge_m <- edge_m[,c(8,7,6,5,9,10,1,3,2)]
+colnames(edge_m)
+
+node_f[node_f ==Inf] <- "Inf"
+node_m[node_m == Inf] <- "Inf"
+
+# Create a new Excel workbook
+wb <- createWorkbook()
+
+# List of data frames to write
+df_list <- list("Female_node" = node_f, "Male_node" = node_m, "Female_edge" = edge_f, "Male_edge" = edge_m)
+
+# Loop through data frames and add them as sheets
+for (sheet_name in names(df_list)) {
+  addWorksheet(wb, sheet_name) # Create a new sheet
+  writeData(wb, sheet_name, df_list[[sheet_name]], na.string = "NA")  # Preserve Inf
+}
+
+# Save workbook
+# saveWorkbook(wb, here("data/spiec-easi/microbes/TableS5-8.xlsx"), overwrite = TRUE)
+```
+
+
+# Nodes & edges from figure 4
+## Load stuff
+```{r}
+# female node table
+node_f <- read_xlsx(path = here("data/spiec-easi/microbes/TableS5-8.xlsx"), sheet = 1)
+
+# female edge table
+edge_f <- read_xlsx(path = here("data/spiec-easi/microbes/TableS5-8.xlsx"), sheet = 3)
+
+# female node table
+node_m <- read_xlsx(path = here("data/spiec-easi/microbes/TableS5-8.xlsx"), sheet = 2)
+
+# female edge table
+edge_m <- read_xlsx(path = here("data/spiec-easi/microbes/TableS5-8.xlsx"), sheet = 4)
+
+# female: Infant_gender == 2
+ps_female <- readRDS(file = here("data/spiec-easi/microbes/ps_female_asv.rds"))
+
+input_taxa <- as.data.frame(tax_table(ps_female))
+```
+
+```{r}
+colnames(node_f)
+colnames(node_m)
+
+colnames(edge_f)
+colnames(edge_m)
+```
+
+```{r}
+# check for normality of nodes & edges
+for (i in c(10, 11, 12, 16, 17, 18, 19)) {
+  print(i)
+  hist(node_f[[i]])
+  hist(node_m[[i]])
+}
+
+hist(edge_f[[9]])
+hist(edge_m[[9]])
+```
+
+## Statistical tests
+```{r}
+# need to use Wilcox test because data is not normally distributed
+graph_stats <- list()
+count = 1
+#colnames(graph_stats) <- colnames(node_f[c(12, 13, 14, 18, 19, 20, 21)])
+for (i in c(10, 11, 12, 16, 17, 18, 19)) {
+  print(i)
+  wilcox_test <- wilcox.test(node_f[[i]], node_m[[i]], paired = TRUE, exact = FALSE)
+  graph_stats[[colnames(node_f[i])]] <- wilcox_test
+  count = count + 1
+}
+
+graph_stats[[colnames(edge_f[9])]] <- wilcox.test(edge_f[[9]], edge_m[[9]], paired = FALSE, exact = FALSE) ## is this the type of test I want to run?
+```
+
+
+```{r}
+# Convert nested list to a data frame
+graph_stats_df <- rbindlist(graph_stats, fill = TRUE, idcol="rownames")
+
+rownames(graph_stats_df) <- graph_stats_df$rownames
+
+for (i in 1:nrow(graph_stats_df)) {   
+  name <- graph_stats_df$rownames[i]  # Extracting row name
+  print(name)  # Debugging to ensure name is correct
+  
+  if (i %in% 1:7) {  
+    graph_stats_df$mean_female[i] <- round(mean(node_f[[name]]), 3)
+    graph_stats_df$sd_female[i]   <- round(sd(node_f[[name]]), 3)
+    graph_stats_df$mean_male[i]   <- round(mean(node_m[[name]]), 3)
+    graph_stats_df$sd_male[i]     <- round(sd(node_m[[name]]), 3)
+  } else {    
+    graph_stats_df$mean_female[i] <- round(mean(edge_f[[name]]), 3)
+    graph_stats_df$sd_female[i]   <- round(sd(edge_f[[name]]), 3)
+    graph_stats_df$mean_male[i]   <- round(mean(edge_m[[name]]), 3)
+    graph_stats_df$sd_male[i]     <- round(sd(edge_m[[name]]), 3)
+  }
+}
+
+# save file
+# write.csv(data.frame(graph_stats_df), file = here("data/spiec-easi/microbes/graph_stats_df_033125.csv"))
+```
+
+
+```{r}
+sum(edge_f$weight < 0)
+sum(edge_m$weight < 0)
+```
+
+```{r}
+# Count positive and negative edges for each dataframe
+male_counts <- table(edge_m$weight > 0)  # TRUE = positive, FALSE = negative
+female_counts <- table(edge_f$weight > 0)
+
+print(paste("Percent negative male edges:", round(sum(edge_m$weight < 0)/sum(edge_m$weight > 0), 2)*100))
+print(paste("Percent negative female edges:", round(sum(edge_f$weight < 0)/sum(edge_f$weight > 0), 2)*100))
+
+# Convert to a matrix for chi-square test
+edge_matrix <- matrix(c(male_counts[["FALSE"]], male_counts[["TRUE"]],
+                        female_counts[["FALSE"]], female_counts[["TRUE"]]),
+                      nrow = 2, byrow = TRUE)
+
+# Add row and column names
+colnames(edge_matrix) <- c("Negative", "Positive")
+rownames(edge_matrix) <- c("Male", "Female")
+
+# Print contingency table
+print(edge_matrix)
+
+# Perform chi-square test
+chi_test <- chisq.test(t(edge_matrix))
+
+# Print results
+print(chi_test)
+
+```
+
+## Calculate global centrality measurements
+```{r}
+graph_m <- readRDS(file = here("data/spiec-easi/microbes/ig_weightcor_m.rds"))
+graph_f <- readRDS(file = here("data/spiec-easi/microbes/ig_weightcor_f.rds"))
+
+unweighted_m <- delete_edge_attr(graph_m, "weight")
+unweighted_f <- delete_edge_attr(graph_f, "weight")
+
+nodes_to_keep <- node_f$id
+
+unweighted_pruned_m <- induced_subgraph(unweighted_m, vids = nodes_to_keep)
+unweighted_pruned_f <- induced_subgraph(unweighted_f, vids = nodes_to_keep)
+```
+
+```{r}
+# Function to compute global properties
+compute_global_properties <- function(graph) {
+  data.frame(
+    num_nodes = vcount(graph),
+    num_edges = ecount(graph),
+    density = edge_density(graph),
+    avg_shortest_path = mean_distance(graph, directed = FALSE, unconnected = TRUE)
+  )
+}
+```
+
+```{r}
+# Compute for Male Graph
+male_properties <- compute_global_properties(unweighted_pruned_m)
+
+# Compute for Female Graph
+female_properties <- compute_global_properties(unweighted_pruned_f)
+
+# Combine into a single dataframe
+global_results <- rbind(male_properties, female_properties)
+
+rownames(global_results) <- c("Male", "Female")
+
+# View results
+print(global_results)
+```
+
+
+```{r}
+compute_global_properties <- function(graph) {
+  data.frame(
+    num_nodes = vcount(graph),
+    num_edges = ecount(graph),
+    density = edge_density(graph),
+    avg_shortest_path = mean_distance(graph, directed = FALSE, unconnected = TRUE),
+    diameter = diameter(graph, directed = FALSE, unconnected = TRUE),
+    radius = radius(graph),
+    mean_degree = mean(degree(graph)),
+    assortativity_degree = assortativity_degree(graph, directed = FALSE),
+    clustering_coefficient = transitivity(graph, type = "global"),
+    modularity = modularity(cluster_louvain(graph)),
+    edge_connectivity = edge_connectivity(graph),
+    avg_betweenness = mean(betweenness(graph))
+  )
+}
+
+# Compute for Male and Female Graphs
+male_properties <- compute_global_properties(unweighted_pruned_m)
+female_properties <- compute_global_properties(unweighted_pruned_f)
+
+# Combine results and set row names
+global_results <- rbind(male_properties, female_properties)
+rownames(global_results) <- c("Male", "Female")
+
+# View results
+print(data.frame(t(round(global_results, 2))))
+```

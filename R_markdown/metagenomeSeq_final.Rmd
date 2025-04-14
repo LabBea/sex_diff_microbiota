@@ -1,0 +1,404 @@
+---
+title: "metagenomeSeq_010325"
+author: "Blake Williams"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## Load packages
+```{r setup, include=FALSE}
+library(here)
+library(phyloseq)
+library(ggplot2)
+library(tidyverse)
+library(vegan)
+library(metagenomeSeq)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Phyloseq
+## Prep workspace
+```{r}
+## Load phylseq object
+ps.f <- readRDS(file = here("data/phyloseq/ps_healthy_filtered_010325.rds"))
+
+input_meta <- data.frame(sample_data(ps.f)) %>%
+  mutate(Infant_gender = case_when(Infant_gender == 2 ~ 1,
+                                   Infant_gender == 1 ~ 0))
+
+sample_data(ps.f) <- input_meta
+
+# female: Infant_gender == 2
+ps_female <- subset_samples(ps.f, Infant_gender == 1)
+
+# male: Infant_gender == 1
+ps_male <- subset_samples(ps.f, Infant_gender == 0)
+```
+
+# MetagenomeSeq
+
+## All analysis w/ interaction term (EGA*sex)
+```{r}
+input_data <- data.frame(otu_table(ps.f))
+input_meta <- data.frame(sample_data(ps.f))
+input_taxa <- data.frame(tax_table(ps.f))
+
+# create new col in input taxa containing the lowest level
+for (i in 1:nrow(input_taxa)) {
+  if (input_taxa$Species[i] != "s__") {
+    input_taxa$plotnames[i] = paste(input_taxa$Genus[i], input_taxa$Species[i], "(s)", sep = " ")
+  } else if (input_taxa$Genus[i] != "g__") {
+    input_taxa$plotnames[i] = paste(input_taxa$Genus[i], "(g)", sep = " ")
+  } else if (input_taxa$Family[i] != "f__") {
+    input_taxa$plotnames[i] = paste(input_taxa$Family[i], "(f)", sep = " ")
+  } else if (input_taxa$Order[i] != "o__") {
+    input_taxa$plotnames[i] = paste(input_taxa$Order[i], "(o)", sep = " ")
+  } else if (input_taxa$Class[i] != "c__") {
+    input_taxa$plotnames[i] = paste(input_taxa$Class[i], "(c)", sep = " ")
+  } else if (input_taxa$Phylum[i] != "p__") {
+    input_taxa$plotnames[i] = paste(input_taxa$Phylum[i], "(p)", sep = " ")
+  } else {
+    input_taxa$plotnames[i] = paste(input_taxa$Kingdom[i], "(k)", sep = " ")
+  }
+}
+
+rm(i)
+```
+
+```{r}
+#load pheno data
+phenotypedata = AnnotatedDataFrame(input_meta)
+phenotypedata
+#load otu data
+otudata <- AnnotatedDataFrame(input_taxa)
+otudata
+```
+
+```{r}
+all(rownames(input_data) == rownames(input_meta))
+```
+
+
+```{r}
+obj.count <- newMRexperiment(t(input_data), phenoData = phenotypedata, featureData = otudata)
+obj.count
+
+data <- pData(obj.count)$Infant_gender
+
+heatmapColColors <- brewer.pal(8, "Accent")[as.integer(factor(data))];
+heatmapCols <- colorRampPalette(brewer.pal(9, "Blues"))(50)
+
+plotMRheatmap(obj = obj.count, n=100, cexRow = 0.4, cexCol = 0.4,
+              trace = "none", col = heatmapCols, key = TRUE,
+              labRow = FALSE, labCol = FALSE, ColSideColors = heatmapColColors)
+legend("topright", legend=c("Female", "Male"),
+       fill = c(brewer.pal(8, "Accent")), cex = 0.8, box.lty = 0)
+```
+
+```{r}
+#Data Prep
+rareFeatures = which(rowSums(MRcounts(obj.count) > 0) < 100)
+trim = obj.count[-rareFeatures, ]
+trimp = cumNormStat(trim, pFlag = TRUE, main = "Trimmed data")
+trim2 = cumNorm(trim, p = trimp)
+```
+
+## ModB - no interaction model
+
+```{r}
+age = as.numeric(pData(trim2)$Age)
+bmi = as.numeric(pData(trim2)$BMI_before_pregnancy) 
+parity = as.integer(pData(trim2)$Parity)
+residency = as.factor(pData(trim2)$Residency_status)
+ega = as.numeric(pData(trim2)$Gestation_week)
+sex = as.factor(pData(trim2)$Infant_gender)
+
+normFactor = normFactors(trim2)
+normFactor = log2(normFactor/median(normFactor) + 1)
+```
+
+```{r}
+modB = model.matrix(~ sex*ega + residency + age + bmi + parity + normFactor)
+settings = zigControl(maxit = 10, verbose = TRUE, pvalMethod = "bootstrap")
+
+fitB = fitZig(obj = trim2, mod = modB, useCSSoffset = FALSE, control = settings)
+
+mean_eff_size <- median(calculateEffectiveSamples(fitB))
+calculateEffectiveSamples(fitB)[order(calculateEffectiveSamples(fitB))]
+hist(calculateEffectiveSamples(fitB)[order(calculateEffectiveSamples(fitB))])
+print(mean_eff_size)
+
+#
+#mean_eff_size <- 
+trim2_filter <- filterData(trim2, present = round(mean_eff_size,0), depth = 1)
+```
+
+```{r}
+smat = lapply(1:ncol(MRcounts(trim2_filter)), function(i) {
+  sort(MRcounts(trim2_filter)[which(MRcounts(trim2_filter)[,i] > 0),i], 
+       decreasing = TRUE)})
+leng = sapply(smat, length)
+colnames(MRcounts(trim2_filter))[leng<=1]
+
+p <- cumNormStatFast(trim2_filter)
+trim2_filter <- cumNorm(trim2_filter, p=p)
+```
+
+```{r}
+modB = model.matrix(~ sex*ega + residency + age + bmi + parity + normFactor)
+settings = zigControl(maxit = 10, verbose = TRUE, pvalMethod = "bootstrap")
+
+fitB = fitZig(obj = trim2, mod = modB, useCSSoffset = FALSE, control = settings)
+
+zigFit = fitB@fit 
+finalMod = fitB@fit$design 
+fit1 = eBayes(zigFit) 
+```
+
+## save files
+```{r}
+# write.csv(fit1[["p.value"]], file = here("data/metagenomeseq/all_samples_sex_ega_interaction_pvalues.csv"))
+# write.csv(fit1[["coefficients"]], file = here("data/metagenomeseq/all_samples_sex_ega_interaction_foldchange.csv"))
+```
+
+
+## read in files
+```{r}
+all_pvals <- read.csv(file = here("data/metagenomeseq/all_samples_sex_ega_interaction_pvalues.csv"), row.names = 1)
+all_coefs <- read.csv(file = here("data/metagenomeseq/all_samples_sex_ega_interaction_foldchange.csv"), row.names = 1)
+```
+
+## prep data
+```{r}
+# calculate adjusted p-values using FDR
+#########################################
+adj_pvals <- as.data.frame(lapply(all_pvals, function(column) p.adjust(column, method = "fdr")))
+row.names(adj_pvals) <- row.names(all_pvals)
+
+# subset significant sex associated adj pvals
+#########################################
+sex_pvals <- adj_pvals %>%
+  filter(sex1 < 10E-3) %>%
+  filter(sex1.ega > 10E-3)
+
+# Subset the dataframe to keep only the "sex1" column and retain row names
+sex_df <- sex_pvals[, "sex1", drop = FALSE] %>%
+  dplyr::rename(qval = sex1)
+
+# subset all_coefs with sex_pvals
+sex_coefs <- all_coefs[rownames(sex_pvals), "sex1", drop = FALSE] %>%
+  dplyr::rename(coef = sex1)
+
+
+sex_df <- cbind(sex_coefs, sex_df)
+
+subset_taxa <- input_taxa[row.names(sex_df), , drop = FALSE]
+
+sex_df <- cbind(sex_df, subset_taxa)
+
+# subset significant ega associated adj pvals
+#########################################
+ega_pvals <- adj_pvals %>%
+  filter(ega < 10E-3) %>%
+  filter(sex1.ega > 10E-3)
+
+# Subset the dataframe to keep only the "ega2" column and retain row names
+ega_df <- ega_pvals[, "ega", drop = FALSE] %>%
+  dplyr::rename(qval = ega)
+
+# subset all_coefs with ega_pvals
+ega_coefs <- all_coefs[rownames(ega_pvals), "ega", drop = FALSE] %>%
+  dplyr::rename(coef = ega)
+
+
+ega_df <- cbind(ega_coefs, ega_df)
+
+subset_taxa <- input_taxa[row.names(ega_df), , drop = FALSE]
+
+ega_df <- cbind(ega_df, subset_taxa)
+
+# subset significant sex*ega associated adj pvals
+#########################################
+sex_ega_pvals <- adj_pvals %>%
+  filter(sex1.ega < 10E-3) %>%
+  filter(sex1 > 10E-3) %>%
+  filter(ega > 10E-3)
+
+# Subset the dataframe to keep only the "sex1" column and retain row names
+sex_ega_df <- sex_ega_pvals[, "sex1.ega", drop = FALSE] %>%
+  dplyr::rename(qval = sex1.ega)
+
+# subset all_coefs with sex_pvals
+sex_ega_coefs <- all_coefs[rownames(sex_ega_pvals), "sex1.ega", drop = FALSE] %>%
+  dplyr::rename(coef = sex1.ega)
+
+
+sex_ega_df <- cbind(sex_ega_coefs, sex_ega_df)
+
+subset_taxa <- input_taxa[row.names(sex_ega_df), , drop = FALSE]
+
+sex_ega_df <- cbind(sex_ega_df, subset_taxa)
+```
+
+```{r}
+# # save files
+# write.csv(sex_df, file = here("data/metagenomeSeq/all_samples_sex_sig_taxa.csv"))
+# write.csv(ega_df, file = here("data/metagenomeSeq/all_samples_ega_sig_taxa.csv"))
+# write.csv(sex_ega_df, file = here("data/metagenomeSeq/all_samples_sex_ega_sig_taxa.csv"))
+```
+
+```{r}
+# load files
+sex_df <- read.csv(file = here("data/metagenomeSeq/all_samples_sex_sig_taxa.csv"), row.names = 1)
+ega_df <- read.csv(file = here("data/metagenomeSeq/all_samples_ega_sig_taxa.csv"), row.names = 1)
+sex_ega_df <- read.csv(file = here("data/metagenomeSeq/all_samples_sex_ega_sig_taxa.csv"), row.names = 1)
+
+# save combined file
+sex_df$Source <- "Sex"
+ega_df$Source <- "EGA"
+sex_ega_df$Source <- "Sex + EGA"
+combined_df <- rbind(sex_df, ega_df, sex_ega_df)
+# write.csv(combined_df, file = here("data/metagenomeSeq/all_samples_all_sig_taxa.csv"))
+```
+
+
+## plot sex only
+```{r}
+sex_df <- read.csv(file = here("data/metagenomeSeq/all_samples_sex_sig_taxa.csv"), row.names = 1)
+# # change sex2:ega to sex2_ega
+# colnames(MRcoefs_final)[colnames(MRcoefs_final) == "sex2:ega"] <- "sex2_ega"
+
+#group taxa by plotnames
+sex_df <- sex_df %>% group_by(plotnames) %>% summarise(coef= mean(coef), qval = mean(qval))
+sex_df$plotnames <- factor(sex_df$plotnames,
+                              sex_df$plotnames[order(sex_df$qval)], ordered=T)
+sex_df$just <- ifelse(sex_df$coef < 0,0,1)
+
+# Order by fold change
+sex_df$plotnames = with(sex_df, reorder(plotnames, coef, median))
+
+cols <- c("0" = "#50B93A", "1" = "#9C7FB9")
+
+ggplot(sex_df, aes(x=plotnames, y=coef, fill=as.character(just))) +
+  geom_bar(stat="identity") +
+  scale_y_continuous("Fold change", limits = c(-2, 1.5), position="left") +
+  scale_x_discrete("", labels = NULL) +
+  scale_fill_manual(values = cols, labels = NULL) +
+  # scale_fill_gradient2(low="#8C6BB1",mid = "#8C96C6", high="#E0ECF4", midpoint=mean(range(sex_df$qval)),
+  #                       limits=range(sex_df$qval), name = "Adjusted p-value") +
+  coord_flip() +
+  theme_minimal()+
+  theme(legend.position = "none", axis.title = element_text(size = 20),
+        axis.text = element_text(size = 15)) +
+  geom_text(aes(x=plotnames, y=0, label=plotnames), hjust=sex_df$just)
+```
+
+## plot ega only
+```{r}
+ega_df <- read.csv(file = here("data/metagenomeSeq/all_samples_ega_sig_taxa.csv"), row.names = 1)
+# # change sex2:ega to sex2_ega
+# colnames(MRcoefs_final)[colnames(MRcoefs_final) == "sex2:ega"] <- "sex2_ega"
+
+#group taxa by plotnames
+ega_df <- ega_df %>% group_by(plotnames) %>% summarise(coef= mean(coef), qval = mean(qval))
+ega_df$plotnames <- factor(ega_df$plotnames,
+                              ega_df$plotnames[order(ega_df$qval)], ordered=T)
+ega_df$just <- ifelse(ega_df$coef < 0,0,1)
+
+# Order by fold change
+ega_df$plotnames = with(ega_df, reorder(plotnames, coef, median))
+
+cols <- c("0" = "#50B93A", "1" = "#9C7FB9")
+
+ggplot(ega_df, aes(x=plotnames, y=coef, fill=as.character(just))) +
+  geom_bar(stat="identity") +
+  scale_y_continuous("Fold change", limits = c(-2, 1.5), position="left") +
+  scale_x_discrete("", labels = NULL) +
+  scale_fill_manual(values = cols, labels = NULL) +
+  # scale_fill_gradient2(low="#8C6BB1",mid = "#8C96C6", high="#E0ECF4", midpoint=mean(range(ega_df$qval)),
+  #                       limits=range(ega_df$qval), name = "Adjusted p-value") +
+  coord_flip() +
+  theme_minimal()+
+  theme(legend.position = "none", axis.title = element_text(size = 20),
+        axis.text = element_text(size = 15)) +
+  geom_text(aes(x=plotnames, y=0, label=plotnames), hjust=ega_df$just)
+```
+
+## plot sex_ega only
+```{r}
+sex_ega_df <- read.csv(file = here("data/metagenomeSeq/all_samples_sex_ega_sig_taxa.csv"), row.names = 1)
+# # change sex2:ega to sex2_ega
+# colnames(MRcoefs_final)[colnames(MRcoefs_final) == "sex2:ega"] <- "sex2_ega"
+
+#group taxa by plotnames
+sex_ega_df <- sex_ega_df %>% group_by(plotnames) %>% summarise(coef= mean(coef), qval = mean(qval))
+sex_ega_df$plotnames <- factor(sex_ega_df$plotnames,
+                              sex_ega_df$plotnames[order(sex_ega_df$qval)], ordered=T)
+sex_ega_df$just <- ifelse(sex_ega_df$coef < 0,0,1)
+
+# Order by fold change
+sex_ega_df$plotnames = with(sex_ega_df, reorder(plotnames, coef, median))
+
+cols <- c("0" = "#50B93A", "1" = "#9C7FB9")
+
+ggplot(sex_ega_df, aes(x=plotnames, y=coef, fill=as.character(just))) +
+  geom_bar(stat="identity") +
+  scale_y_continuous("Fold change", limits = c(-2, 1.5), position="left") +
+  scale_x_discrete("", labels = NULL) +
+  scale_fill_manual(values = cols, labels = NULL) +
+  # scale_fill_gradient2(low="#8C6BB1",mid = "#8C96C6", high="#E0ECF4", midpoint=mean(range(sex_ega_df$qval)),
+  #                       limits=range(sex_ega_df$qval), name = "Adjusted p-value") +
+  coord_flip() +
+  theme_minimal()+
+  theme(legend.position = "none", axis.title = element_text(size = 20),
+        axis.text = element_text(size = 15)) +
+  geom_text(aes(x=plotnames, y=0, label=plotnames), hjust=sex_ega_df$just)
+```
+
+
+```{r}
+sex_df$Source <- "Sex"
+ega_df$Source <- "EGA"
+sex_ega_df$Source <- "Sex + EGA"
+combined_df <- rbind(sex_df, ega_df, sex_ega_df)
+
+ggplot(combined_df, aes(x = coef, y = reorder(plotnames, coef), fill = Source)) +
+    geom_col(position = position_dodge(width = 1)) +  # Moves bars side by side
+    labs(x = "Fold change", y = NULL) +
+    theme_minimal() +
+    scale_fill_manual(values = c("Sex" = "#640D5F", "EGA" = "#EB5B00", "Sex + EGA" = "#FFB200"))
+```
+
+
+```{r}
+ggplot(combined_df, aes(x = coef, y = reorder(plotnames, coef), fill = Source)) +
+    geom_col(position = position_dodge(width = 1)) +  # Moves bars side by side
+    labs(x = "Fold change", y = NULL) +
+    theme_minimal() +
+    scale_fill_manual(values = c("Sex" = "#FDB462", "EGA" = "#8DD3C7", "Sex + EGA" = "#BC80BD"))
+```
+
+
+
+```{r}
+# Lollipop Plots for Differential Abundance
+combined_df %>%
+  arrange(coef) %>%
+  #mutate(plotnames = factor(plotnames)) %>% # Set order
+  ggplot(aes(x = plotnames, y = coef)) +
+    geom_segment(aes(x = plotnames, xend = plotnames, y = 0, yend = coef), color = "gray") +
+    geom_point(aes(color = as.factor(Source)), size = 6) + # Map color to Time_Level
+    coord_flip() +
+    theme_bw() +
+    xlab("") +
+    ylab("Fold Change") +
+    ggtitle("") +
+    scale_color_manual(values = c("Sex" = "#FDB462", "EGA" = "#8DD3C7", "Sex + EGA" = "#BC80BD"),
+                       name = "Feature")  +
+    theme(axis.text.x = element_text(color = "black", family = "Arial", size = 11),
+      axis.text.y = element_text(color = "black", family = "Arial", size = 11))
+```
+
+```{r}
+# write.csv(combined_df, here("data/metagenomeSeq/all_samples_all_sig_taxa_plotting.csv"))
+```
