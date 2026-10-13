@@ -1,0 +1,635 @@
+---
+title: "Prepare PICRUSt2 Input Files from a phyloseq Object"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+params:
+  phyloseq_rds: "phyloseq_object.rds"
+  outdir: "~/Desktop/sex_differences/Blake Project/data/picrust2/picrust2_input_css_all"
+  rename_sequence_taxa: true
+---
+
+# Overview
+
+This notebook extracts PICRUSt2-ready files from a saved `phyloseq` object.
+
+It writes:
+
+- `feature_table.biom` — raw feature/ASV count table in BIOM format
+- `feature_table.tsv` — human-readable feature count table
+- `study_seqs.fasta` — representative sequences
+- `sample_metadata.tsv` — sample metadata, when available
+- `taxonomy.tsv` — taxonomy table, when available
+- `feature_id_map.tsv` — mapping between original taxa names and output feature IDs
+- `prep_summary.tsv` — basic QC summary
+
+> **Important:** PICRUSt2 requires representative sequences in FASTA format, not raw sequencing FASTQ files. Raw FASTQ reads are generally not stored in a `phyloseq` object and cannot be reconstructed from it.
+
+This notebook supports two common phyloseq structures:
+
+1. Representative sequences are stored in `refseq(physeq)`.
+2. The ASV nucleotide sequences themselves are used as the taxa names, as is common in DADA2 workflows.
+
+```{r setup}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = TRUE,
+  warning = TRUE
+)
+
+suppressPackageStartupMessages({
+  library(phyloseq)
+  library(biomformat)
+  library(here)
+})
+
+phyloseq_rds <- params$phyloseq_rds
+outdir <- params$outdir
+rename_sequence_taxa <- params$rename_sequence_taxa
+
+dir.create(
+  outdir,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+message("phyloseq object: ", phyloseq_rds)
+message("Output directory: ", outdir)
+```
+
+# Load the phyloseq object
+
+```{r load-phyloseq}
+physeq <- readRDS(file = here("data/phyloseq/ps_all_css.rds"))
+
+physeq
+```
+
+# Extract the raw count matrix
+
+PICRUSt2 should receive the original feature counts rather than relative abundance, CLR, CPM, percentages, or other normalized values.
+
+`phyloseq` objects can store taxa either as rows or columns. This chunk automatically converts the matrix to:
+
+**features × samples**
+
+```{r extract-count-matrix}
+otu <- otu_table(physeq)
+
+count_matrix <- as(
+  otu,
+  "matrix"
+)
+
+if (!taxa_are_rows(physeq)) {
+  count_matrix <- t(count_matrix)
+}
+
+storage.mode(count_matrix) <- "numeric"
+
+message(
+  "Count matrix dimensions: ",
+  nrow(count_matrix),
+  " features x ",
+  ncol(count_matrix),
+  " samples"
+)
+
+if (anyNA(count_matrix)) {
+  stop("Count matrix contains NA values.")
+}
+
+if (any(!is.finite(count_matrix))) {
+  stop("Count matrix contains non-finite values.")
+}
+
+if (any(count_matrix < 0)) {
+  stop("Count matrix contains negative values.")
+}
+
+if (!all(abs(count_matrix - round(count_matrix)) < 1e-8)) {
+  stop(
+    paste0(
+      "The phyloseq abundance table contains non-integer values. ",
+      "PICRUSt2 should normally be run on raw ASV/OTU counts."
+    )
+  )
+}
+
+count_matrix <- round(count_matrix)
+storage.mode(count_matrix) <- "integer"
+```
+
+# Remove zero-abundance features
+
+```{r remove-zero-features}
+zero_features <- rowSums(count_matrix) == 0
+
+n_zero_features <- sum(zero_features)
+
+if (n_zero_features > 0) {
+  message(
+    "Removing ",
+    n_zero_features,
+    " features with zero total abundance."
+  )
+
+  count_matrix <- count_matrix[
+    !zero_features,
+    ,
+    drop = FALSE
+  ]
+}
+
+if (nrow(count_matrix) == 0) {
+  stop("No non-zero features remain.")
+}
+```
+
+# Extract representative sequences
+
+First, the notebook checks whether representative sequences are stored in the phyloseq `refseq` component.
+
+If not, it checks whether the taxa names themselves look like nucleotide sequences.
+
+```{r extract-representative-sequences}
+original_feature_ids <- rownames(count_matrix)
+
+ref_sequences <- NULL
+sequence_source <- NULL
+
+# Try phyloseq refseq first.
+refseq_object <- tryCatch(
+  phyloseq::refseq(physeq),
+  error = function(e) NULL
+)
+
+if (!is.null(refseq_object)) {
+
+  ref_sequences <- as.character(refseq_object)
+
+  if (is.null(names(ref_sequences))) {
+    stop(
+      paste0(
+        "A refseq component was found, but its sequences do not have names. ",
+        "The sequence names must correspond to phyloseq taxa IDs."
+      )
+    )
+  }
+
+  sequence_source <- "phyloseq refseq"
+
+} else {
+
+  taxa_ids <- taxa_names(physeq)
+
+  looks_like_dna <- grepl(
+    "^[ACGTURYKMSWBDHVNacgturykmswbdhvn-]+$",
+    taxa_ids
+  )
+
+  sufficiently_long <- nchar(taxa_ids) >= 20
+
+  if (all(looks_like_dna & sufficiently_long)) {
+
+    ref_sequences <- toupper(taxa_ids)
+    names(ref_sequences) <- taxa_ids
+    sequence_source <- "taxa names"
+
+  } else {
+
+    stop(
+      paste0(
+        "\nNo representative sequences were found in the phyloseq object.\n\n",
+        "The object has no usable refseq component and the taxa names do not ",
+        "appear to be nucleotide sequences.\n\n",
+        "Raw FASTQ files cannot be reconstructed from a phyloseq object. ",
+        "You will need the representative ASV/OTU FASTA from the upstream ",
+        "DADA2/QIIME2/mothur processing workflow."
+      )
+    )
+  }
+}
+
+message("Representative sequence source: ", sequence_source)
+message("Sequences available: ", length(ref_sequences))
+```
+
+# Match count-table features and sequences
+
+```{r match-features}
+features_with_sequence <- intersect(
+  rownames(count_matrix),
+  names(ref_sequences)
+)
+
+features_missing_sequence <- setdiff(
+  rownames(count_matrix),
+  names(ref_sequences)
+)
+
+sequences_missing_counts <- setdiff(
+  names(ref_sequences),
+  rownames(count_matrix)
+)
+
+message("Features in count matrix: ", nrow(count_matrix))
+message("Features with representative sequence: ", length(features_with_sequence))
+message("Features lacking a sequence: ", length(features_missing_sequence))
+message("Sequences lacking counts: ", length(sequences_missing_counts))
+
+if (length(features_with_sequence) == 0) {
+  stop(
+    "No feature IDs overlap between the count matrix and representative sequences."
+  )
+}
+
+writeLines(
+  features_missing_sequence,
+  file.path(outdir, "features_missing_sequence.txt")
+)
+
+writeLines(
+  sequences_missing_counts,
+  file.path(outdir, "sequences_missing_counts.txt")
+)
+
+count_matrix <- count_matrix[
+  features_with_sequence,
+  ,
+  drop = FALSE
+]
+
+ref_sequences <- ref_sequences[
+  features_with_sequence
+]
+```
+
+# Assign simple ASV IDs when appropriate
+
+When DADA2 sequences are stored directly as taxa names, PICRUSt2 can technically use those sequences as IDs, but simple IDs such as `ASV1`, `ASV2`, etc. make downstream files much easier to work with.
+
+Set the YAML parameter:
+
+```text
+rename_sequence_taxa: false
+```
+
+if you want to keep the original taxa names unchanged.
+
+```{r feature-ids}
+old_ids <- rownames(count_matrix)
+
+ids_are_sequences <- grepl(
+  "^[ACGTURYKMSWBDHVNacgturykmswbdhvn-]+$",
+  old_ids
+) & nchar(old_ids) >= 20
+
+if (rename_sequence_taxa && all(ids_are_sequences)) {
+
+  new_ids <- paste0(
+    "ASV",
+    seq_len(nrow(count_matrix))
+  )
+
+} else {
+
+  new_ids <- old_ids
+}
+
+feature_id_map <- data.frame(
+  feature_id = new_ids,
+  original_taxon_id = old_ids,
+  sequence = unname(ref_sequences),
+  stringsAsFactors = FALSE
+)
+
+rownames(count_matrix) <- new_ids
+names(ref_sequences) <- new_ids
+
+write.table(
+  feature_id_map,
+  file = file.path(outdir, "feature_id_map.tsv"),
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)
+
+head(feature_id_map)
+```
+
+# Remove zero-read samples after matching
+
+```{r remove-zero-samples}
+zero_samples <- colSums(count_matrix) == 0
+
+if (any(zero_samples)) {
+
+  message(
+    "Removing ",
+    sum(zero_samples),
+    " samples with zero reads after feature matching."
+  )
+
+  message(
+    paste(
+      colnames(count_matrix)[zero_samples],
+      collapse = "\n"
+    )
+  )
+
+  count_matrix <- count_matrix[
+    ,
+    !zero_samples,
+    drop = FALSE
+  ]
+}
+
+if (ncol(count_matrix) == 0) {
+  stop("No samples remain after filtering.")
+}
+```
+
+# Write the count table as TSV
+
+```{r write-count-tsv}
+feature_table_tsv <- data.frame(
+  FeatureID = rownames(count_matrix),
+  count_matrix,
+  check.names = FALSE
+)
+
+write.table(
+  feature_table_tsv,
+  file = file.path(outdir, "feature_table.tsv"),
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)
+
+message(
+  "Saved: ",
+  file.path(outdir, "feature_table.tsv")
+)
+```
+
+# Write the BIOM count table
+
+```{r write-biom}
+biom_object <- make_biom(
+  data = count_matrix
+)
+
+biom_file <- file.path(
+  outdir,
+  "feature_table.biom"
+)
+
+write_biom(
+  biom_object,
+  biom_file
+)
+
+message("Saved: ", biom_file)
+```
+
+# Validate the BIOM file
+
+```{r validate-biom}
+biom_check <- read_biom(
+  biom_file
+)
+
+biom_check_matrix <- as.matrix(
+  biom_data(biom_check)
+)
+
+if (!identical(
+  rownames(biom_check_matrix),
+  rownames(count_matrix)
+)) {
+  stop("BIOM validation failed: feature IDs changed.")
+}
+
+if (!identical(
+  colnames(biom_check_matrix),
+  colnames(count_matrix)
+)) {
+  stop("BIOM validation failed: sample IDs changed.")
+}
+
+message("BIOM validation passed.")
+```
+
+# Write representative sequences as FASTA
+
+PICRUSt2 expects the FASTA header for each sequence to contain only the corresponding feature ID.
+
+```{r write-fasta}
+fasta_file <- file.path(
+  outdir,
+  "study_seqs.fasta"
+)
+
+con <- file(
+  fasta_file,
+  open = "wt"
+)
+
+for (feature_id in names(ref_sequences)) {
+
+  sequence <- ref_sequences[[feature_id]]
+
+  writeLines(
+    paste0(">", feature_id),
+    con
+  )
+
+  sequence_length <- nchar(sequence)
+
+  starts <- seq(
+    1,
+    sequence_length,
+    by = 80
+  )
+
+  ends <- pmin(
+    starts + 79,
+    sequence_length
+  )
+
+  wrapped_sequence <- substring(
+    sequence,
+    starts,
+    ends
+  )
+
+  writeLines(
+    wrapped_sequence,
+    con
+  )
+}
+
+close(con)
+
+message("Saved: ", fasta_file)
+```
+
+# Export sample metadata
+
+```{r sample-metadata}
+sample_data_object <- tryCatch(
+  sample_data(physeq),
+  error = function(e) NULL
+)
+
+if (!is.null(sample_data_object)) {
+
+  metadata <- as.data.frame(
+    sample_data_object,
+    stringsAsFactors = FALSE
+  )
+
+  metadata <- metadata[
+    colnames(count_matrix),
+    ,
+    drop = FALSE
+  ]
+
+  metadata <- data.frame(
+    SampleID = rownames(metadata),
+    metadata,
+    check.names = FALSE
+  )
+
+  write.table(
+    metadata,
+    file = file.path(outdir, "sample_metadata.tsv"),
+    sep = "\t",
+    quote = FALSE,
+    row.names = FALSE
+  )
+
+  message(
+    "Saved: ",
+    file.path(outdir, "sample_metadata.tsv")
+  )
+}
+```
+
+# Export taxonomy
+
+Taxonomy is not required for the main PICRUSt2 prediction pipeline, but it is useful to retain for interpretation and QC.
+
+```{r taxonomy}
+tax_object <- tryCatch(
+  tax_table(physeq),
+  error = function(e) NULL
+)
+
+if (!is.null(tax_object)) {
+
+  taxonomy_matrix <- as(
+    tax_object,
+    "matrix"
+  )
+
+  taxonomy_matrix <- taxonomy_matrix[
+    old_ids,
+    ,
+    drop = FALSE
+  ]
+
+  taxonomy_df <- data.frame(
+    FeatureID = new_ids,
+    taxonomy_matrix,
+    check.names = FALSE,
+    stringsAsFactors = FALSE
+  )
+
+  write.table(
+    taxonomy_df,
+    file = file.path(outdir, "taxonomy.tsv"),
+    sep = "\t",
+    quote = FALSE,
+    row.names = FALSE
+  )
+
+  message(
+    "Saved: ",
+    file.path(outdir, "taxonomy.tsv")
+  )
+}
+```
+
+# QC summary
+
+```{r qc-summary}
+summary_df <- data.frame(
+  metric = c(
+    "sequence_source",
+    "final_features",
+    "final_samples",
+    "total_reads",
+    "minimum_sample_reads",
+    "median_sample_reads",
+    "maximum_sample_reads",
+    "features_missing_sequence",
+    "sequences_missing_counts"
+  ),
+  value = c(
+    sequence_source,
+    nrow(count_matrix),
+    ncol(count_matrix),
+    sum(count_matrix),
+    min(colSums(count_matrix)),
+    median(colSums(count_matrix)),
+    max(colSums(count_matrix)),
+    length(features_missing_sequence),
+    length(sequences_missing_counts)
+  ),
+  stringsAsFactors = FALSE
+)
+
+write.table(
+  summary_df,
+  file = file.path(outdir, "prep_summary.tsv"),
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)
+
+summary_df
+```
+
+# Final PICRUSt2 inputs
+
+The two files needed for PICRUSt2 are:
+
+```text
+picrust2_input/feature_table.biom
+picrust2_input/study_seqs.fasta
+```
+
+A typical PICRUSt2 command is:
+
+```bash
+picrust2_pipeline.py \
+    -s picrust2_input/study_seqs.fasta \
+    -i picrust2_input/feature_table.biom \
+    -o picrust2_output \
+    -p 8
+```
+
+Before running PICRUSt2, the BIOM file can also be checked from the command line:
+
+```bash
+biom summarize-table \
+    -i picrust2_input/feature_table.biom
+
+biom validate-table \
+    -i picrust2_input/feature_table.biom
+```
+
+

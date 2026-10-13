@@ -1,0 +1,4167 @@
+---
+title: "maaslin2 KEGG - final"
+author: "Blake Williams"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: yes
+    df_print: paged
+  pdf_document: default
+  html_notebook:
+    toc: yes
+---
+
+# Prep workspace
+## Load packages
+```{r setup, include=FALSE}
+library(here)
+library(phyloseq)
+library(ggplot2)
+library(tidyverse)
+library(Biostrings)
+library(vegan)
+library(readxl)
+library(metagenomeSeq)
+library(compositions)
+library(Maaslin2)
+library(ggpubr)
+library(quantreg)
+library(readxl)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load picrust data
+```{r}
+outdir <- here("data", "MaasLin2", "picrust2_output_css_all")
+
+plotdir <- here("data", "manuscript", "figure3_picrust")
+
+dir.create(outdir,
+           recursive = TRUE,
+           showWarnings = FALSE)
+
+dir.create(plotdir,
+           recursive = TRUE,
+           showWarnings = FALSE)
+
+# directories
+directoryOutput_phyloseq<-here("data", "phyloseq/")
+directoryOutput_PRICRUSt2<-here("data", "picrust2", "picrust_output_css_all/")
+directoryOutput_EC<-file.path(directoryOutput_PRICRUSt2, 'EC_metagenome_out/')
+directoryOutput_pathways<-file.path(directoryOutput_PRICRUSt2,'pathways_out/')
+directoryOutput_KO<- file.path(directoryOutput_PRICRUSt2,'KO_metagenome_out/')
+
+# ── Predicted metagenome using KO numbers───────────────────────────────────────────────────────────────
+KO_pred_metagenome_unstrat<-
+  read.table(
+    file=paste(directoryOutput_PRICRUSt2,"KO_metagenome_out/pred_metagenome_unstrat.tsv.gz",sep=""),
+    sep='\t', 
+    header=TRUE, 
+    stringsAsFactors = FALSE)
+KO_pred_metagenome_unstrat_v0<-KO_pred_metagenome_unstrat
+KO_pred_metagenome_unstrat<-KO_pred_metagenome_unstrat_v0[,-1]
+rownames(KO_pred_metagenome_unstrat)<-KO_pred_metagenome_unstrat_v0[,1]
+rm(KO_pred_metagenome_unstrat_v0)
+
+# ── Predicted metagenome using EC numbers───────────────────────────────────────────────────────────────
+EC_pred_metagenome_unstrat<-read.table(
+  file=paste(directoryOutput_PRICRUSt2,"EC_metagenome_out/pred_metagenome_unstrat.tsv.gz",sep=""),
+  sep='\t', 
+  header=TRUE, 
+  stringsAsFactors = FALSE)
+EC_pred_metagenome_unstrat_v0<-EC_pred_metagenome_unstrat
+EC_pred_metagenome_unstrat<-EC_pred_metagenome_unstrat_v0[,-1]
+rownames(EC_pred_metagenome_unstrat)<-EC_pred_metagenome_unstrat_v0[,1]
+rm(EC_pred_metagenome_unstrat_v0)
+
+# ── Predicted pathway abundance───────────────────────────────────────────────────────────────
+path_abun_unstrat<-read.table(
+  file=paste(directoryOutput_PRICRUSt2,"pathways_out/path_abun_unstrat.tsv.gz",sep=""),
+  sep='\t', 
+  header=TRUE, 
+  stringsAsFactors = FALSE)
+path_abun_unstrat_v0<-path_abun_unstrat
+path_abun_unstrat<-path_abun_unstrat_v0[,-1]
+rownames(path_abun_unstrat)<-path_abun_unstrat_v0[,1]
+rm(path_abun_unstrat_v0)
+
+```
+
+## Load metadata
+```{r}
+## Load phylseq object
+ps.f <- readRDS(file=here("data/phyloseq/ps_css.rds"))
+
+input_meta <- data.frame(sample_data(ps.f)) %>%
+  mutate(fetal_sex_binary = as.factor(fetal_sex_binary)) %>%
+  mutate(Residency_status = as.factor(Residency_status))
+
+# ------------------------------------------------------------
+# Center & scale continuous variables
+# so we can compare effect sizes of ega & fetal sex
+# ------------------------------------------------------------
+
+input_meta$gest_week_s <-
+  scale(input_meta$Gestation_week)
+
+input_meta$age_s <-
+  scale(input_meta$Age)
+
+input_meta$bmi_s <-
+  scale(input_meta$BMI_before_pregnancy)
+
+input_meta$parity_s <-
+  (input_meta$Parity)
+
+# ------------------------------------------------------------
+# Sex x gestational-age interaction
+# ------------------------------------------------------------
+
+input_meta$fetal_sex_binary_num <- as.numeric(
+  as.character(input_meta$fetal_sex_binary)
+)
+
+input_meta$sex_x_ega <-
+  input_meta$fetal_sex_binary_num *
+  as.numeric(input_meta$gest_week_s)
+
+model_variables <- c(
+  "fetal_sex_binary",
+  "gest_week_s",
+  "sex_x_ega",
+  "age_s",
+  "bmi_s",
+  "parity_s",
+  "Residency_status"
+)
+
+print(
+  summary(
+    input_meta[ , model_variables],
+    useNA = "ifany"
+  )
+)
+
+
+
+```
+# KEGG
+## abundance filtering
+```{r}
+# ============================================================
+# ── Remove of KO's with low prevalance ──────────────────
+# ============================================================
+kegg_counts <- KO_pred_metagenome_unstrat
+colSums_predicted_KO<-apply(kegg_counts,2,function(x) sum(as.numeric(x),na.rm=TRUE))
+rel_abun<-sweep(kegg_counts,2,colSums_predicted_KO,FUN="/")
+#rel_abun[!is.finite(rel_abun)]=0
+hist(as.matrix(rel_abun), breaks=200, xlim = c(0.001,0.006), ylim=c(0,10000))
+rel_abun_filter<-apply(rel_abun,1,function(x){
+    rr<-ifelse (all(as.numeric(x)<=1E-5),FALSE,TRUE)}) # based on histogram
+kegg_counts_f<-kegg_counts[rel_abun_filter,]
+```
+
+
+## maaslin2
+```{r}
+# input_data <- t(picrust.kegg)
+
+fixed_effects <- c(
+  "fetal_sex_binary",
+  "gest_week_s",
+  "sex_x_ega",
+  "age_s",
+  "bmi_s",
+  "parity_s",
+  "Residency_status"
+)
+
+## Fit data
+fit_data <- Maaslin2(
+  input_data = t(kegg_counts_f),
+  input_metadata = input_meta,
+  min_abundance = 0,
+  min_prevalence = 0.9,
+  normalization = "CLR",
+  transform = "NONE",
+  standardize = FALSE,
+  analysis_method = "LM",
+  output = file.path(outdir, "KEGG"),
+  fixed_effects = fixed_effects,
+  plot_heatmap = FALSE,
+  plot_scatter = FALSE,
+  #save_models = TRUE
+  #cores = 4
+)
+```
+
+
+
+## significant KEGGs
+```{r}
+# load maaslin2 results
+all_maaslin <- read.csv(file = file.path(outdir, "KEGG", "all_results.tsv"), sep = "\t")
+
+all_sig <- all_maaslin %>%
+  filter(qval < 0.25) %>%
+  filter(metadata %in% c("fetal_sex_binary", "gest_week_s", "sex_x_ega")) 
+
+write.csv(all_sig, file = file.path(outdir, "KEGG", "KEGG_sig.csv"))
+
+selected_kegg_ids <- all_sig$feature
+```
+
+### add labels - KEGGREST
+```{r}
+library(KEGGREST)
+kegg_ids <- unique(selected_kegg_ids)
+kegg_info <- list(kegg_ids)
+for (i in 1:length(kegg_ids)) {
+  q <- keggGet(kegg_ids[[i]])
+  kegg_info[i] <- q
+}
+
+# out_dir <- here("data/MaasLin2/picrust2_out_css_final/outs")
+# 
+# dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+# save list file
+saveRDS(kegg_info, file = file.path(outdir, "KEGG", "kegg_list_sex.rds"))
+
+# convert to df
+kegg_df <- as.data.frame(do.call(rbind, kegg_info), fill = TRUE)
+
+kegg_df[,1:3] <- lapply(kegg_df[,1:3], function(x) if (is.list(x)) sapply(x, toString) else x)
+
+# save first 3 columns (entry, symbol, name) as csv
+write.csv(kegg_df[1:3], file = file.path(outdir, "KEGG", "kegg_df_sex.csv"))
+
+# save data frame file
+saveRDS(kegg_df, file = file.path(outdir, "KEGG", "kegg_df_sex.rds"))
+
+# read in file
+kegg_df <- read.csv(file = file.path(outdir, "KEGG", "kegg_df_sex.csv"), row.names = 1)
+
+# Rename a specific column by matching its old name
+names(kegg_df)[names(kegg_df) == "ENTRY"] <- "feature"
+
+
+all_sig_final <- merge(kegg_df, all_sig, by = "feature")
+
+# save all sig final
+write.csv(all_sig_final, file = file.path(outdir, "KEGG", "kegg_df_sex.csv"))
+```
+
+## plot sig keggs - sex, sex + gest week, interaction
+```{r}
+# save all sig final
+all_sig_final <- read.csv(file = file.path(outdir, "KEGG", "kegg_df_sex.csv"), row.names = 1)
+
+all_sig_sex_int <- all_sig_final %>%
+  filter(metadata %in% c("fetal_sex_binary", "sex_x_ega"))
+```
+
+```{r}
+kegg_significance_groups <- all_sig_final%>%
+  dplyr::mutate(
+    metadata = trimws(as.character(metadata))
+  ) %>%
+  dplyr::filter(
+    metadata %in% c(
+      "fetal_sex_binary",
+      "gest_week_s",
+      "sex_x_ega"
+    )
+  ) %>%
+  dplyr::distinct(
+    feature,
+    metadata
+  ) %>%
+  dplyr::mutate(
+    sig_sex = metadata == "fetal_sex_binary",
+    sig_gest_week = metadata == "gest_week_s",
+    sig_interaction = metadata == "sex_x_ega"
+  ) %>%
+  dplyr::group_by(feature) %>%
+  dplyr::summarise(
+    sig_sex = any(sig_sex),
+    sig_gest_week = any(sig_gest_week),
+    sig_interaction = any(sig_interaction),
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+    significance_group = dplyr::case_when(
+      # Significant interaction takes priority,
+      # regardless of whether main effects are also significant
+      sig_interaction ~
+        "Fetal sex x EGA interaction",
+
+      # Sex only
+      sig_sex &
+        !sig_gest_week &
+        !sig_interaction ~
+        "Fetal sex",
+
+      # EGA only
+      !sig_sex &
+        sig_gest_week &
+        !sig_interaction ~
+        "EGA",
+
+      # Both main effects significant, but interaction not significant
+      sig_sex &
+        sig_gest_week &
+        !sig_interaction ~
+        "Fetal sex + EGA",
+
+      TRUE ~ "Other"
+    )
+  )
+
+kegg_significance_groups <- kegg_significance_groups %>%
+  dplyr::mutate(
+    significance_group = factor(
+      significance_group,
+      levels = c(
+        "Fetal sex",
+        "EGA",
+        "Fetal sex + EGA",
+        "Fetal sex x EGA interaction"
+      )
+    )
+  )
+
+kegg_significance_groups %>%
+  dplyr::count(
+    significance_group,
+    name = "n_keggs"
+  ) %>%
+  dplyr::arrange(
+    dplyr::desc(n_keggs)
+  )
+```
+
+## plot sig keggs - final
+```{r}
+library(grid)
+# ============================================================
+# Keep only the four significance groups to plot
+# ============================================================
+
+groups_to_plot <- c(
+  "Fetal sex",
+  "Fetal sex + EGA",
+#  "Fetal sex x EGA interaction"
+)
+
+# don't plot gestational week coefficients 
+kegg_df_plot <- all_sig_final %>%
+  dplyr::left_join(
+    kegg_significance_groups %>%
+      dplyr::select(
+        feature,
+        significance_group
+      ),
+    by = "feature"
+  ) %>%
+  dplyr::filter(
+    significance_group %in% groups_to_plot
+  ) %>%
+  dplyr::mutate(
+    significance_group = factor(
+      significance_group,
+      levels = groups_to_plot
+    ),
+
+    neg_log10_q = -log10(qval),
+
+    direction = dplyr::if_else(
+      coef >= 0,
+      "Positive",
+      "Negative"
+    )
+  )
+
+group_colors <- c(
+  "Fetal sex" = "#E69F00",
+  "Fetal sex + EGA" = "#7A5195",
+ # "Interaction only" = "#CC79A7",
+  "Fetal sex x EGA interaction" = "#0072B2"
+)
+
+kegg_df_plot <- kegg_df_plot %>%
+  dplyr::arrange(
+    significance_group,
+    coef
+  ) %>%
+  dplyr::mutate(
+    plot_label = paste(
+      significance_group,
+      SYMBOL,
+      sep = "___GROUP___"
+    ),
+
+    plot_label = factor(
+      plot_label,
+      levels = unique(plot_label)
+    )
+  )
+
+# ============================================================
+# Colors for the actual MaAsLin terms being plotted
+# ============================================================
+
+metadata_colors <- c(
+  "Fetal sex" = "#BC80BD",
+  "EGA" = "#0072B2"
+)
+# ============================================================
+# Prepare plotting data
+#
+# Keep:
+#   - Sex only
+#   - EGA only
+#   - Sex + EGA
+#
+# Exclude significant interactions
+# ============================================================
+
+kegg_df_plot_filtered <- kegg_df_plot %>%
+  dplyr::filter(
+    significance_group %in% c(
+      "Fetal sex",
+    #  "EGA",
+      "Fetal sex + EGA"
+    )
+  ) %>%
+  dplyr::filter(
+    metadata %in% c(
+      "fetal_sex_binary",
+      "gest_week_s"
+    )
+  ) %>%
+  dplyr::mutate(
+    metadata = dplyr::recode(
+      metadata,
+      "fetal_sex_binary" = "Fetal sex",
+      "gest_week_s" = "EGA"
+    ),
+    metadata = factor(
+      metadata,
+      levels = c(
+        "Fetal sex",
+        "EGA"
+      )
+    )
+  )
+
+# ============================================================
+# Set enzyme ordering
+#
+# Each NAME_short gets exactly one y-axis position.
+# ============================================================
+
+kegg_name_order <- kegg_df_plot_filtered %>%
+  dplyr::group_by(
+    SYMBOL
+  ) %>%
+  dplyr::summarise(
+    mean_coef = mean(
+      coef,
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  ) %>%
+  dplyr::arrange(
+    mean_coef
+  )
+
+kegg_df_plot_filtered <- kegg_df_plot_filtered %>%
+  dplyr::mutate(
+    plot_label = factor(
+      SYMBOL,
+      levels = kegg_name_order$SYMBOL
+    )
+  )
+
+p_kegg_groups <- ggplot(
+  kegg_df_plot_filtered,
+  aes(
+    x = coef,
+    y = plot_label,
+    color = metadata
+  )
+) +
+
+  geom_vline(
+    xintercept = 0,
+    linetype = "dashed",
+    linewidth = 0.5
+  ) +
+
+  # ----------------------------------------------------------
+  # Lollipop stems
+  #
+  # If an enzyme has both sex and EGA associations,
+  # both stems/dots occupy the same y-axis line.
+  # ----------------------------------------------------------
+
+  geom_segment(
+    aes(
+      x = 0,
+      xend = coef,
+      y = plot_label,
+      yend = plot_label,
+      color = metadata
+    ),
+    linewidth = 0.5,
+    alpha = 0.35,
+    show.legend = FALSE
+  ) +
+
+  geom_point(
+    aes(
+      size = neg_log10_q,
+      color = metadata
+    ),
+    alpha = 0.9
+  ) +
+
+  scale_color_manual(
+    values = metadata_colors,
+    breaks = c(
+      "Fetal sex",
+      "EGA"
+    ),
+    drop = FALSE
+  ) +
+
+  scale_size_continuous(
+    range = c(
+      2,
+      5
+    ),
+    name = expression(-log[10](q))
+  ) +
+
+  labs(
+    x = "MaAsLin coefficient",
+    y = NULL,
+    color = "Significant association",
+    size = expression(-log[10](q))
+  ) +
+
+  guides(
+    color = guide_legend(
+      order = 1,
+      title.position = "top",
+      override.aes = list(
+        size = 6,
+        alpha = 1
+    )
+    ),
+    size = guide_legend(
+      order = 2,
+      title.position = "top"
+    )
+  ) +
+  
+  theme_classic() +
+  
+  theme(
+    legend.position = "bottom",
+    legend.box = "horizontal",
+    legend.direction = "vertical",
+    legend.title = element_text(
+      size = 16
+    ),
+    axis.text.x = element_text(
+      size = 14
+    ),
+    legend.text = element_text(
+      size = 13
+    ),
+    axis.text.y = element_text(
+       size = 12
+     ),
+    axis.title.x = element_text(
+      size = 14
+    )
+  )
+  # +
+  # 
+  # theme(
+  #   legend.position = "bottom",
+  #   legend.box = "horizontal",
+  # 
+
+
+p_kegg_groups
+
+ggsave(
+  file.path(
+    plotdir,
+    "kegg_significance_groups_lollipop.png"
+  ),
+  plot = p_kegg_groups,
+  dpi = 600,
+  width = 8,
+  height =8,
+  units = "in",
+  limitsize = FALSE
+)
+```
+
+
+
+
+
+## trimester plots - final
+```{r}
+library(ggh4x)
+
+all_sig_sex_int <- all_sig_final %>%
+  filter(metadata == "sex_x_ega")
+
+ECs_to_plot <- all_sig_sex_int$feature
+# ============================================================
+# 5. Extract coefficients needed to calculate
+#    conditional fetal-sex effect
+#
+# NOTE:
+# gest_week_s determines which ECs are included/grouped,
+# but it is NOT part of the conditional fetal-sex equation.
+#
+# Conditional sex effect =
+# beta_sex + beta_sex_ega * gest_week_s
+# ============================================================
+
+sex_coefficients <- all_maaslin %>%
+  dplyr::mutate(
+    metadata = trimws(as.character(metadata)),
+    feature = as.character(feature),
+    coef = as.numeric(coef)
+  ) %>%
+  dplyr::filter(
+    metadata %in% c(
+      "fetal_sex_binary",
+      "sex_x_ega"
+    )
+  ) %>%
+  dplyr::select(
+    feature,
+    metadata,
+    coef
+  ) %>%
+  dplyr::distinct() %>%
+  tidyr::pivot_wider(
+    names_from = metadata,
+    values_from = coef
+  ) %>%
+  dplyr::rename(
+    beta_sex = fetal_sex_binary,
+    beta_sex_ega = sex_x_ega
+  ) %>%
+  dplyr::filter(
+    feature %in% ECs_to_plot
+  )
+
+
+# ============================================================
+# 6. Check that all selected ECs have coefficients
+# ============================================================
+
+missing_coefs <- setdiff(
+  ECs_to_plot,
+  sex_coefficients$feature
+)
+
+if (length(missing_coefs) > 0) {
+  warning(
+    length(missing_coefs),
+    " selected ECs are missing sex/interaction coefficients."
+  )
+}
+
+# ============================================================
+# 8. Participant-level metadata
+# ============================================================
+
+participant_meta <- input_meta %>%
+  tibble::rownames_to_column(
+    "sample_id"
+  ) %>%
+  dplyr::mutate(
+    fetal_sex = dplyr::case_when(
+      fetal_sex_binary == 0 ~ "Male",
+      fetal_sex_binary == 1 ~ "Female",
+      TRUE ~ NA_character_
+    ),
+
+    fetal_sex = factor(
+      fetal_sex,
+      levels = c(
+        "Male",
+        "Female"
+      )
+    ),
+
+    trimester = dplyr::case_when(
+      Gestation_week < 14 ~
+        "Trimester 1",
+
+      Gestation_week >= 14 &
+        Gestation_week < 28 ~
+        "Trimester 2",
+
+      Gestation_week >= 28 ~
+        "Trimester 3",
+
+      TRUE ~ NA_character_
+    ),
+
+    trimester = factor(
+      trimester,
+      levels = c(
+        "Trimester 1",
+        "Trimester 2",
+        "Trimester 3"
+      )
+    )
+  )
+
+# ============================================================
+# Add EC annotations/significance group to coefficient table
+# ============================================================
+
+EC_annotation_df <- EC_df_plot %>%
+  dplyr::select(
+    feature,
+    SYMBOL,
+    significance_group
+  ) %>%
+  dplyr::distinct()
+
+sex_coefficients <- sex_coefficients %>%
+  dplyr::left_join(
+    EC_annotation_df,
+    by = "feature"
+  )
+
+# ============================================================
+# 9. Generate participant-specific conditional sex effects
+#
+# THIS MUST BE REBUILT HERE.
+#
+# Do not reuse sex_effect_participant from the first
+# sex_x_ega-only plot.
+# ============================================================
+
+sex_effect_participant <- sex_coefficients %>%
+  tidyr::crossing(
+    participant_meta
+  ) %>%
+  dplyr::mutate(
+    effective_sex_coef =
+      beta_sex +
+      beta_sex_ega * as.numeric(gest_week_s)
+  ) %>%
+  dplyr::filter(
+    !is.na(trimester),
+    !is.na(fetal_sex),
+    !is.na(effective_sex_coef),
+    !is.na(significance_group),
+    !is.na(SYMBOL)
+  )
+
+
+# ============================================================
+# 10. Verify that all significance groups are represented
+# ============================================================
+
+group_counts <- sex_effect_participant %>%
+  dplyr::distinct(
+    feature,
+    significance_group
+  ) %>%
+  dplyr::count(
+    significance_group,
+    name = "n_ECs"
+  )
+
+print(group_counts)
+
+
+# ============================================================
+# 11. Define EC ordering
+#
+# Use the sex × EGA coefficient as the ordering variable
+# when available.
+#
+# Because the plotting ID includes significance group,
+# ECs remain separated correctly across facet groups.
+# ============================================================
+
+plot_order_df <- sex_coefficients %>%
+  dplyr::select(
+    feature,
+    SYMBOL,
+    significance_group,
+    beta_sex_ega
+  ) %>%
+  dplyr::distinct() %>%
+  dplyr::arrange(
+    significance_group,
+    beta_sex_ega
+  ) %>%
+  dplyr::mutate(
+    plot_id = paste(
+      significance_group,
+      feature,
+      sep = "___GROUP___"
+    )
+  )
+
+plot_levels <- unique(
+  plot_order_df$plot_id
+)
+
+
+# ============================================================
+# 12. Apply plotting ID/order
+# ============================================================
+
+sex_effect_participant <- sex_effect_participant %>%
+  dplyr::mutate(
+    plot_id = paste(
+      significance_group,
+      feature,
+      sep = "___GROUP___"
+    ),
+
+    plot_id = factor(
+      plot_id,
+      levels = plot_levels
+    )
+  )
+
+
+# ============================================================
+# 13. Taxonomy display labels
+# ============================================================
+
+plot_labels <- setNames(
+  plot_order_df$SYMBOL,
+  plot_order_df$plot_id
+)
+
+
+# ============================================================
+# 14. Calculate mean conditional effect within trimester
+# ============================================================
+
+sex_effect_participant <- sex_effect_participant %>%
+  dplyr::group_by(
+    plot_id,
+    trimester
+  ) %>%
+  dplyr::mutate(
+    mean_effective_coef = mean(
+      effective_sex_coef,
+      na.rm = TRUE
+    ),
+
+    mean_direction = dplyr::if_else(
+      mean_effective_coef < 0,
+      "Mean < 0",
+      "Mean > 0"
+    )
+  ) %>%
+  dplyr::ungroup()
+
+
+# ============================================================
+# Dummy data for significance-group legend
+# ============================================================
+
+legend_group_df <- sex_effect_participant %>%
+  dplyr::distinct(
+    significance_group
+  ) %>%
+  dplyr::filter(
+    !is.na(significance_group)
+  )
+
+# ============================================================
+# Plot
+# ============================================================
+
+p <- ggplot(
+  sex_effect_participant,
+  aes(
+    x = effective_sex_coef,
+    y = plot_id
+  )
+) +
+  geom_boxplot(
+    aes(
+      fill = mean_direction
+    ),
+    width = 0.65,
+    outlier.shape = NA
+  ) +
+
+  geom_jitter(
+    width = 0,
+    height = 0.08,
+    size = 1,
+    alpha = 0.4,
+    color = "grey30"
+  ) +
+
+  # Invisible points used only to create significance-group legend
+  geom_point(
+    data = legend_group_df,
+    aes(
+      x = Inf,
+      y = Inf,
+      color = significance_group
+    ),
+    inherit.aes = FALSE,
+    alpha = 0
+  ) +
+
+  geom_vline(
+    xintercept = 0,
+    color = "darkgrey",
+    linewidth = 0.5
+  ) +
+
+  ggh4x::facet_grid2(
+    rows = vars(significance_group),
+    cols = vars(trimester),
+    scales = "free_y",
+    space = "free_y",
+    # strip = ggh4x::strip_themed(
+    #   background_y = ggh4x::elem_list_rect(
+    #     fill = unname(group_colors),
+    #     color = NA
+    #   ),
+    #   text_y = ggh4x::elem_list_text(
+    #     colour = "transparent",
+    #     size = 1,
+    #     hjust = 0.5,
+    #     vjust = 0.5
+    #   )
+    # )
+  ) +
+
+  scale_fill_manual(
+    values = c(
+      "Mean < 0" = "#50B93A",
+      "Mean > 0" = "#9C7FB9"
+    ),
+    drop = FALSE
+  ) +
+
+  scale_color_manual(
+    values = group_colors,
+    breaks = levels(
+      sex_effect_participant$significance_group
+    ),
+    drop = FALSE
+  ) +
+
+  scale_y_discrete(
+    labels = plot_labels
+  ) +
+
+  labs(
+    x = "Conditional fetal sex effect (Female - Male)",
+    y = "",
+    color = "Significant association",
+    fill = "Mean coefficient"
+  ) +
+
+  guides(
+    color = guide_legend(
+      order = 1,
+      title.position = "top",
+      override.aes = list(
+        alpha = 1,
+        size = 7,
+        shape = 15
+      )
+    ),
+
+    fill = guide_legend(
+      order = 2,
+      title.position = "top",
+      override.aes = list(
+        size = 6
+      )
+    )
+  ) +
+
+  theme_classic() +
+  theme(
+    legend.position = "bottom",
+    legend.box = "horizontal",
+    legend.direction = "vertical",
+    legend.title = element_text(
+      size = 16
+    ),
+    legend.text = element_text(
+      size = 14
+    )
+  ) +
+  
+  theme(
+    axis.text.y = element_text(
+      size = 14
+    ),
+
+    axis.text.x = element_text(
+      size = 14
+    ),
+
+    axis.title.x = element_text(
+      size = 15
+    ),
+
+    strip.text.x = element_text(
+      size = 14,
+      face = "bold"
+    ),
+
+    strip.text.y = element_blank(),
+    strip.background.y = element_blank()
+    ) +
+
+    guides(
+    fill = guide_legend(
+      order = 1
+    ),
+
+    color = guide_legend(
+      order = 2,
+      override.aes = list(
+        alpha = 1,
+        size = 5,
+        shape = 15
+      )
+    )
+  )
+
+  # theme(
+  #   axis.text.y = element_text(
+  #     size = 11
+  #   ),
+  # 
+  #   axis.text.x = element_text(
+  #     size = 11
+  #   ),
+  # 
+  #   axis.title.x = element_text(
+  #     size = 13
+  #   ),
+  # 
+  #   strip.text = element_text(
+  #     size = 12,
+  #     face = "bold"
+  #   ),
+  # 
+  #   legend.title = element_text(
+  #     size = 12
+  #   ),
+  # 
+  #   legend.text = element_text(
+  #     size = 11
+  #   )
+  # )
+
+p
+
+
+ggsave(file.path(plotdir, "ECs_sex_adjusted_box_per_tri.png"), plot = p, dpi = 600, 
+       width = 12, height = 8, units = "in", limitsize = FALSE)
+```
+
+
+
+
+
+
+
+
+
+
+```{r}
+library(grid)
+# ============================================================
+# Keep only the four significance groups to plot
+# ============================================================
+
+groups_to_plot <- c(
+  "Fetal sex",
+  "Fetal sex + EGA",
+  "Fetal sex x EGA interaction"
+)
+
+# don't plot gestational week coefficients 
+kegg_df_plot <- all_sig_sex_int %>%
+  dplyr::left_join(
+    kegg_significance_groups %>%
+      dplyr::select(
+        feature,
+        significance_group
+      ),
+    by = "feature"
+  ) %>%
+  dplyr::filter(
+    significance_group %in% groups_to_plot
+  ) %>%
+  dplyr::mutate(
+    significance_group = factor(
+      significance_group,
+      levels = groups_to_plot
+    ),
+
+    neg_log10_q = -log10(qval),
+
+    direction = dplyr::if_else(
+      coef >= 0,
+      "Positive",
+      "Negative"
+    )
+  )
+
+group_colors <- c(
+  "Fetal sex" = "#E69F00",
+  "Fetal sex + EGA" = "#7A5195",
+ # "Interaction only" = "#CC79A7",
+  "Fetal sex x EGA interaction" = "#0072B2"
+)
+
+kegg_df_plot <- kegg_df_plot %>%
+  dplyr::arrange(
+    significance_group,
+    coef
+  ) %>%
+  dplyr::mutate(
+    plot_label = paste(
+      significance_group,
+      SYMBOL,
+      sep = "___GROUP___"
+    ),
+
+    plot_label = factor(
+      plot_label,
+      levels = unique(plot_label)
+    )
+  )
+
+p_kegg_groups <- ggplot(
+  kegg_df_plot,
+  aes(
+    x = coef,
+    y = plot_label,
+    color = significance_group
+  )
+) +
+  geom_vline(
+    xintercept = 0,
+    linetype = "dashed",
+    linewidth = 0.5
+  ) +
+
+  geom_segment(
+    aes(
+      x = 0,
+      xend = coef,
+      y = plot_label,
+      yend = plot_label
+    ),
+    color = "gray",
+    linewidth = 0.5,
+    inherit.aes = FALSE
+  ) +
+
+  geom_point(
+    aes(
+      size = neg_log10_q
+    ),
+    alpha = 0.85
+  ) +
+
+  facet_grid(
+    rows = vars(significance_group),
+    scales = "free_y",
+    space = "free_y"
+  ) +
+
+  scale_y_discrete(
+    labels = function(x) {
+      sub(
+        "^.*___GROUP___",
+        "",
+        x
+      )
+    }
+  ) +
+
+  scale_color_manual(
+    values = group_colors,
+    breaks = groups_to_plot,
+    drop = FALSE
+  ) +
+
+  scale_size_continuous(
+    range = c(2, 5),
+    name = expression(-log[10](q))
+  ) +
+
+  labs(
+    x = "MaAsLin coefficient",
+    y = NULL,
+    color = "Significant association",
+    size = expression(-log[10](q))
+  ) +
+  
+  guides(
+    color = guide_legend(
+      order = 1,
+      title.position = "top",
+      override.aes = list(
+        size = 6,
+        alpha = 1
+    )
+    ),
+    size = guide_legend(
+      order = 2,
+      title.position = "top"
+    )
+  ) +
+  
+  theme_classic() +
+  
+  theme(
+    legend.position = "bottom",
+    legend.box = "horizontal",
+    legend.direction = "vertical",
+    legend.title = element_text(
+      size = 16
+    ),
+    legend.text = element_text(
+      size = 13
+    )
+  ) +
+  theme(
+    
+    # Keep column facet labels, e.g. trimester
+    strip.text.x = element_text(
+      size = 14,
+      face = "bold"
+    ),
+
+    strip.text.y = element_blank(),
+
+    axis.text.y = element_text(
+      size = 10
+    ),
+
+    axis.text.x = element_text(
+      size = 14
+    ),
+
+    axis.title.x = element_text(
+      size = 14
+    )
+  )
+
+p_kegg_groups
+
+ggsave(
+  file.path(
+    plotdir,
+    "kegg_significance_groups_lollipop.png"
+  ),
+  plot = p_kegg_groups,
+  dpi = 600,
+  width = 8,
+  height = 10,
+  units = "in",
+  limitsize = FALSE
+)
+```
+
+
+## microbiomeProfiler
+
+```{r}
+library(MicrobiomeProfiler)
+run_MicrobiomeProfiler()
+```
+
+```{r}
+plot_df <- read_excel(path = file.path(outdir, "KEGG", "microbiomeprofiler.xlsx"), col_names = TRUE)
+
+plot_df <- plot_df %>%
+  arrange(zScore) %>%
+  mutate(
+    Pathway = factor(
+      Description,
+      levels = Description
+    )
+  ) %>%
+  mutate(
+    Count = factor(
+      Count,
+      levels = c(3, 4)
+    )
+  )
+
+p <- ggplot(
+  plot_df,
+  aes(
+    x = zScore,
+    y = Pathway
+  )
+) +
+  geom_point(
+    aes(
+      size = Count,
+      color = p.adjust
+    ),
+    alpha = 0.9
+  ) +
+  scale_size_manual(
+    name = "Count",
+    values = c(
+      "3" = 4,
+      "4" = 7
+    )
+  ) +
+  scale_color_gradient(
+    low = "#8C47D7", high = "#619486",
+  ) +
+  scale_x_continuous(
+    limits = c(
+      0,
+      NA
+    ),
+    expand = expansion(
+      mult = c(0, 0.05)
+    )
+  ) +
+  labs(
+    x = "Z-score",
+    y = NULL,
+    color = "Adjusted p-value"
+  ) +
+  theme_bw()
+
+p
+```
+```{r}
+ggsave(
+  filename = file.path(plotdir, "pathway_zscore_dotplot.png"),
+  plot = p,
+  width = 7,
+  height = 8,
+  units = "in",
+  dpi = 600,
+  bg = "white"
+)
+```
+
+## plots - fig 3c
+```{r}
+library(dplyr)
+library(tidyr)
+library(readxl)
+library(ggplot2)
+library(patchwork)
+
+# ============================================================
+# 1. Load pathway results
+# ============================================================
+
+plot_df <- read_excel(path = file.path(outdir, "KEGG", "microbiomeprofiler.xlsx"), col_names = TRUE)
+
+# ============================================================
+# 2. Load fetal-sex KEGG coefficients
+# ============================================================
+
+fetal_sex <- all_sig_sex_int
+
+# ============================================================
+# 3. Split pathway geneID column into individual KEGG IDs
+# ============================================================
+
+kegg_long <- plot_df %>%
+  dplyr::mutate(
+    geneID = as.character(geneID)
+  ) %>%
+  tidyr::separate_rows(
+    geneID,
+    sep = "/"
+  ) %>%
+  dplyr::mutate(
+    geneID = trimws(geneID)
+  )
+
+# ============================================================
+# 4. Join fetal-sex coefficients
+# ============================================================
+
+kegg_long <- kegg_long %>%
+  dplyr::left_join(
+    fetal_sex %>%
+      dplyr::select(
+        feature,
+        coef
+      ) %>%
+      dplyr::distinct(),
+    by = c(
+      "geneID" = "feature"
+    )
+  )
+
+# ============================================================
+# 5. Classify KEGG IDs by coefficient direction
+# ============================================================
+
+kegg_long <- kegg_long %>%
+  dplyr::mutate(
+    direction = dplyr::case_when(
+      coef > 0 ~ "Positive",
+      coef < 0 ~ "Negative",
+      TRUE ~ NA_character_
+    )
+  )
+
+# ============================================================
+# 6. Count positive/negative KEGG IDs in each pathway
+#
+# Use Description here so it matches the y-axis of the
+# enrichment plot.
+# ============================================================
+
+direction_counts <- kegg_long %>%
+  dplyr::filter(
+    !is.na(direction)
+  ) %>%
+  dplyr::distinct(
+    Description,
+    geneID,
+    direction
+  ) %>%
+  dplyr::count(
+    Description,
+    direction,
+    name = "n_keggs"
+  ) %>%
+  tidyr::complete(
+    Description,
+    direction = c(
+      "Positive",
+      "Negative"
+    ),
+    fill = list(
+      n_keggs = 0
+    )
+  )
+
+# ============================================================
+# 7. Define pathway ordering ONCE
+# ============================================================
+
+pathway_levels <- plot_df %>%
+  dplyr::arrange(
+    zScore
+  ) %>%
+  dplyr::pull(
+    Description
+  ) %>%
+  unique()
+
+plot_df <- plot_df %>%
+  dplyr::mutate(
+    Pathway = factor(
+      Description,
+      levels = pathway_levels
+    ),
+
+    Count = factor(
+      Count,
+      levels = c(
+        3,
+        4
+      )
+    )
+  )
+
+direction_counts <- direction_counts %>%
+  dplyr::mutate(
+    Pathway = factor(
+      Description,
+      levels = pathway_levels
+    ),
+
+    direction = factor(
+      direction,
+      levels = c(
+        "Positive",
+        "Negative"
+      )
+    )
+  )
+
+# ============================================================
+# 8. Original enrichment dot plot
+# ============================================================
+
+p_dot <- ggplot(
+  plot_df,
+  aes(
+    x = zScore,
+    y = Pathway
+  )
+) +
+  geom_point(
+    aes(
+      size = Count,
+      color = p.adjust
+    ),
+    alpha = 0.9
+  ) +
+  scale_size_manual(
+    name = "Count",
+    values = c(
+      "3" = 4,
+      "4" = 7
+    )
+  ) +
+  scale_color_gradient(
+    low = "#8C47D7",
+    high = "#619486"
+  ) +
+  scale_x_continuous(
+    limits = c(
+      0,
+      NA
+    ),
+    expand = expansion(
+      mult = c(
+        0,
+        0.05
+      )
+    )
+  ) +
+  labs(
+    x = "Z-score",
+    y = NULL,
+    color = "Adjusted p-value"
+  ) +
+  theme_bw() +
+  theme(text = element_text(size = 14),
+    axis.text.y = element_text(
+      size = 14
+    ),
+
+    axis.text.x = element_text(
+      size = 14
+    ),
+
+    axis.title.x = element_text(
+      size = 14
+    ))
+
+# ============================================================
+# 9. Positive/negative KEGG bar plot
+# ============================================================
+
+direction_colors <- c(
+  "Positive" = "#9C7FB9",
+  "Negative" = "#50B93A"
+)
+
+p_bar <- ggplot(
+  direction_counts,
+  aes(
+    x = n_keggs,
+    y = Pathway,
+    fill = direction
+  )
+) +
+  geom_col(
+    width = 0.7
+  ) +
+  scale_fill_manual(
+    values = direction_colors,
+    name = "Female fetal-sex association"
+  ) +
+  scale_x_continuous(
+    breaks = scales::pretty_breaks(),
+    expand = expansion(
+      mult = c(
+        0,
+        0.05
+      )
+    )
+  ) +
+  labs(
+    x = "Number of KEGGs",
+    y = NULL
+  ) +
+  theme_bw() +
+  theme(
+    # Pathway labels are already shown on left plot
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.x = element_text(
+      size = 14
+    ),
+
+    axis.title.x = element_text(
+      size = 14
+    )
+  )
+
+# ============================================================
+# 10. Combine plots
+# ============================================================
+
+p_combined <- p_dot + p_bar +
+  patchwork::plot_layout(
+    widths = c(
+      2.2,
+      1
+    ),
+    guides = "collect"
+  ) &
+  theme(
+    legend.position = "bottom"
+  )
+
+p_combined
+
+direction_counts_diverging <- direction_counts %>%
+  dplyr::mutate(
+    plot_count = dplyr::if_else(
+      direction == "Negative",
+      -n_keggs,
+      n_keggs
+    )
+  )
+
+p_bar <- ggplot(
+  direction_counts_diverging,
+  aes(
+    x = plot_count,
+    y = Pathway,
+    fill = direction
+  )
+) +
+  geom_col(
+    width = 0.7
+  ) +
+  geom_vline(
+    xintercept = 0,
+    color = "grey40",
+    linewidth = 0.4
+  ) +
+  scale_fill_manual(
+    values = direction_colors,
+    name = "Female fetal-sex association"
+  ) +
+  scale_x_continuous(
+    labels = abs
+  ) +
+  labs(
+    x = "Number of KEGGs",
+    y = NULL
+  ) +
+  theme_bw() +
+  theme(
+    text = element_text(size = 14),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.x = element_text(
+      size = 14
+    ),
+
+    axis.title.x = element_text(
+      size = 14
+    )
+  )
+
+p_combined <- p_dot + p_bar +
+  patchwork::plot_layout(
+    widths = c(
+      2.2,
+      1
+    ),
+    guides = "collect"
+  ) &
+  theme(
+    legend.position = "bottom"
+  ) &
+  guides(
+  fill = guide_legend(
+    title.position = "top",
+    title.hjust = 0.5
+  ),
+  color = guide_colorbar(
+    title.position = "top",
+    title.hjust = 0.5
+  ),
+  size = guide_legend(
+    title.position = "top",
+    title.hjust = 0.5
+  )
+)
+
+p_combined
+
+ggsave(file.path(plotdir, "microbiome_profiler_dot_bar_combined.png"), plot = last_plot(), dpi = 600, width = 10, height = 6, units = "in", limitsize = FALSE)
+```
+
+
+
+# ECs
+## abundance filtering
+```{r}
+# ── Remove of EC's with low prevalance ──────────────────
+EC_Sample <- EC_pred_metagenome_unstrat
+colSums_predicted_EC<-apply(EC_Sample,2,function(x) sum(as.numeric(x),na.rm=TRUE))
+rel_abun<-sweep(EC_Sample,2,colSums_predicted_EC,FUN="/")
+hist(as.matrix(rel_abun), breaks=200, xlim = c(0,0.005), ylim=c(0,100000))
+rel_abun_cutoff<-apply(rel_abun,1,function(x){
+    rr<-ifelse (all(as.numeric(x)<=1E-4),FALSE,TRUE)})
+EC_Sample_v1<-EC_Sample[rel_abun_cutoff,]
+```
+
+## maaslin2
+```{r}
+# input_data <- t(picrust.kegg)
+
+fixed_effects <- c(
+  "fetal_sex_binary",
+  "gest_week_s",
+  "sex_x_ega",
+  "age_s",
+  "bmi_s",
+  "parity_s",
+  "Residency_status"
+)
+
+## Fit data
+fit_data <- Maaslin2(
+  input_data = t(EC_Sample_v1),
+  input_metadata = input_meta,
+  min_abundance = 0,
+  min_prevalence = 0.9,
+  normalization = "CLR",
+  transform = "NONE",
+  standardize = FALSE,
+  analysis_method = "LM",
+  output = file.path(outdir, "EC"),
+  fixed_effects = fixed_effects,
+  plot_heatmap = FALSE,
+  plot_scatter = FALSE,
+  #save_models = TRUE
+  #cores = 4
+)
+```
+
+## signficant ECs
+```{r}
+# load maaslin2 results
+all_maaslin <- read.csv(file = file.path(outdir, "EC", "all_results.tsv"), sep = "\t")
+
+all_sig <- all_maaslin %>%
+  filter(qval < 0.25) %>%
+  filter(metadata %in% c("fetal_sex_binary", "gest_week_s", "sex_x_ega")) 
+
+write.csv(all_sig, file = file.path(outdir, "EC", "EC_sig.csv"))
+
+selected_kegg_ids <- all_sig$feature
+```
+
+## add labels - KEGGREST
+```{r}
+library(KEGGREST)
+
+# Convert list to character vector
+kegg_ids <- unique(unlist(selected_kegg_ids))
+
+library(KEGGREST)
+library(stringr)
+
+# Convert PICRUSt-style EC IDs to KEGG format
+kegg_ids <- sub(
+  "^EC\\.",
+  "ec:",
+  kegg_ids
+)
+
+head(kegg_ids)
+
+kegg_info <- vector(
+  "list",
+  length(kegg_ids)
+)
+
+names(kegg_info) <- kegg_ids
+
+for (i in seq_along(kegg_ids)) {
+
+  message(
+    i,
+    "/",
+    length(kegg_ids),
+    ": ",
+    kegg_ids[i]
+  )
+
+  q <- tryCatch(
+    keggGet(kegg_ids[i]),
+    error = function(e) {
+      warning(
+        "Failed for ",
+        kegg_ids[i],
+        ": ",
+        conditionMessage(e)
+      )
+      return(NULL)
+    }
+  )
+
+  if (!is.null(q) && length(q) > 0) {
+
+    entry <- q[[1]]
+
+    # --------------------------------------------------------
+    # Detect transferred EC entries
+    # --------------------------------------------------------
+
+    transferred_to <- NA_character_
+
+    if (!is.null(entry$NAME)) {
+
+      name_text <- paste(
+        entry$NAME,
+        collapse = " "
+      )
+
+      transferred_match <- stringr::str_match(
+        name_text,
+        "(?i)Transferred to EC[ :]*([0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+)"
+      )
+
+      if (!is.na(transferred_match[1, 2])) {
+        transferred_to <- transferred_match[1, 2]
+      }
+    }
+
+    # --------------------------------------------------------
+    # If transferred, query the new EC number
+    # --------------------------------------------------------
+
+    if (!is.na(transferred_to)) {
+
+      new_kegg_id <- paste0(
+        "ec:",
+        transferred_to
+      )
+
+      message(
+        "  Transferred to ",
+        new_kegg_id
+      )
+
+      q_new <- tryCatch(
+        keggGet(new_kegg_id),
+        error = function(e) {
+          warning(
+            "Failed transferred EC ",
+            new_kegg_id,
+            ": ",
+            conditionMessage(e)
+          )
+          return(NULL)
+        }
+      )
+
+      if (!is.null(q_new) && length(q_new) > 0) {
+
+        new_entry <- q_new[[1]]
+
+        # Keep original and transferred IDs for traceability
+        new_entry$ORIGINAL_EC <- kegg_ids[i]
+        new_entry$TRANSFERRED_TO <- new_kegg_id
+
+        kegg_info[[i]] <- new_entry
+
+      } else {
+
+        entry$ORIGINAL_EC <- kegg_ids[i]
+        entry$TRANSFERRED_TO <- new_kegg_id
+
+        kegg_info[[i]] <- entry
+      }
+
+    } else {
+
+      entry$ORIGINAL_EC <- kegg_ids[i]
+      entry$TRANSFERRED_TO <- NA_character_
+
+      kegg_info[[i]] <- entry
+    }
+  }
+
+  Sys.sleep(0.2)
+}
+```
+
+
+```{r}
+# out_dir <- here("data/MaasLin2/picrust2_out_css_final/outs")
+# 
+# dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+# save list file
+saveRDS(kegg_info, file = file.path(outdir, "EC", "ec_list_sex.rds"))
+
+# convert to df
+kegg_df <- as.data.frame(do.call(rbind, kegg_info), fill = TRUE)
+
+kegg_df[,1:3] <- lapply(kegg_df[,1:3], function(x) if (is.list(x)) sapply(x, toString) else x)
+
+# save first 3 columns (entry, symbol, name) as csv
+write.csv(kegg_df[1:3], file = file.path(outdir, "EC", "ec_df_sex.csv"))
+
+# save data frame file
+saveRDS(kegg_df, file = file.path(outdir, "EC", "ec_df_sex.rds"))
+
+# read in file
+kegg_df <- read.csv(file = file.path(outdir, "EC", "ec_df_sex.csv"), row.names = 1)
+
+kegg_df <- kegg_df %>%
+  mutate(
+    feature = sub("^EC\\s+", "EC.", ENTRY)
+  )
+
+all_sig_final <- merge(kegg_df, all_sig, by = "feature")
+
+# save all sig final
+write.csv(all_sig_final, file = file.path(outdir, "EC", "ec_df_sex.csv"))
+```
+
+## plot sig ecs - sex, sex + gest week, interaction
+```{r}
+# load maaslin2 results
+all_maaslin <- read.csv(file = file.path(outdir, "EC", "all_results.tsv"), sep = "\t")
+
+# load all sig final
+all_sig_final <- read.csv(file = file.path(outdir, "EC", "EC_df_sex.csv"), row.names = 1)
+
+all_sig_sex_int <- all_sig_final %>%
+  filter(metadata %in% c("fetal_sex_binary", "sex_x_ega"))
+```
+
+```{r}
+EC_significance_groups <- all_sig_final %>%
+ dplyr::distinct(
+    feature,
+    metadata
+  ) %>%
+  dplyr::mutate(
+    sig_sex = metadata == "fetal_sex_binary",
+    sig_gest_week = metadata == "gest_week_s",
+    sig_interaction = metadata == "sex_x_ega"
+  ) %>%
+  dplyr::group_by(feature) %>%
+  dplyr::summarise(
+    sig_sex = any(sig_sex),
+    sig_gest_week = any(sig_gest_week),
+    sig_interaction = any(sig_interaction),
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+    significance_group = dplyr::case_when(
+
+      # Significant interaction takes priority,
+      # regardless of whether main effects are also significant
+      sig_interaction ~
+        "Fetal sex x EGA interaction",
+
+      # Sex only
+      sig_sex &
+        !sig_gest_week &
+        !sig_interaction ~
+        "Fetal sex",
+
+      # EGA only
+      !sig_sex &
+        sig_gest_week &
+        !sig_interaction ~
+        "EGA",
+
+      # Both main effects significant, but interaction not significant
+      sig_sex &
+        sig_gest_week &
+        !sig_interaction ~
+        "Fetal sex + EGA",
+
+      TRUE ~ "Other"
+    )
+  )
+
+EC_significance_groups <- EC_significance_groups %>%
+  dplyr::mutate(
+    significance_group = factor(
+      significance_group,
+      levels = c(
+        "Fetal sex",
+        "EGA",
+        "Fetal sex + EGA",
+        "Fetal sex x EGA interaction"
+      )
+    )
+  )
+
+EC_significance_groups %>%
+  dplyr::count(
+    significance_group,
+    name = "n_ECs"
+  ) %>%
+  dplyr::arrange(
+    dplyr::desc(n_ECs)
+  )
+```
+```{r}
+library(grid)
+# ============================================================
+# Keep only the four significance groups to plot
+# ============================================================
+
+groups_to_plot <- c(
+  "Fetal sex",
+  "Fetal sex + EGA",
+  "Fetal sex x EGA interaction"
+)
+
+# don't plot gestational week coefficients 
+
+# ============================================================
+# Prepare plotting dataframe
+# ============================================================
+
+EC_df_plot <- all_sig_final %>%
+  mutate(
+    # --------------------------------------------------------
+    # Short NAME
+    # KEGG NAME often contains many synonyms separated by ;
+    # Keep only the first name
+    # --------------------------------------------------------
+    NAME_first = str_extract(NAME, "^[^;]+"),
+    NAME_first = str_squish(NAME_first),
+    
+    # Replace specific long enzyme name with shorter label
+    NAME_first = case_when(
+      NAME_first ==
+        "galactofuranosylgalactofuranosylrhamnosyl-N-acetylglucosaminyl-diphospho-decaprenol beta-1,5/1,6-galactofuranosyltransferase" ~
+        "β-1,5/1,6-galactofuranosyltransferase",
+      TRUE ~ NAME_first
+    ),
+
+
+    # Shorten very long first names
+    NAME_short = str_trunc(
+      NAME_first,
+      width = 45,
+      side = "right",
+      ellipsis = "..."
+    ),
+
+    # --------------------------------------------------------
+    # Clean EC label
+    # EC.2.4.99.16 -> EC 2.4.99.16
+    # --------------------------------------------------------
+    EC_label = str_replace(
+      feature,
+      "^EC\\.",
+      "EC "
+    ),
+
+    # --------------------------------------------------------
+    # Broad enzyme class
+    #
+    # Example:
+    # "Transferases;, Glycosyltransferases;, ..."
+    # becomes
+    # "Transferases"
+    # --------------------------------------------------------
+    CLASS_broad = str_extract(
+      CLASS,
+      "^[^;]+"
+    ),
+    CLASS_broad = str_squish(CLASS_broad),
+
+    # Optional more detailed hierarchy
+    CLASS_detail = str_replace_all(
+      CLASS,
+      ";,\\s*",
+      " > "
+    ),
+    CLASS_detail = str_remove(
+      CLASS_detail,
+      ";\\s*$"
+    ),
+
+    # --------------------------------------------------------
+    # Clean metadata names
+    # --------------------------------------------------------
+    metadata = recode(
+      metadata,
+      "fetal_sex_binary" = "Fetal sex",
+      "gest_week_s" = "EGA",
+      "sex_x_ega" = "Sex × EGA interaction"
+    ),
+
+    metadata = factor(
+      metadata,
+      levels = c(
+        "Fetal sex",
+        "EGA",
+        "Sex × EGA interaction"
+      )
+    ),
+
+    # Useful for optional point-size mapping
+    neg_log10_q = -log10(qval),
+
+    direction = if_else(
+      coef >= 0,
+      "Positive",
+      "Negative"
+    )
+  ) %>%
+  dplyr::left_join(
+    EC_significance_groups %>%
+      dplyr::select(
+        feature,
+        significance_group
+      ),
+    by = "feature"
+  ) %>%
+  dplyr::filter(
+    significance_group %in% groups_to_plot
+  ) %>%
+  dplyr::mutate(
+    significance_group = factor(
+      significance_group,
+      levels = groups_to_plot
+    ),
+
+    neg_log10_q = -log10(qval),
+
+    direction = dplyr::if_else(
+      coef >= 0,
+      "Positive",
+      "Negative"
+    )
+  )
+
+EC_df_plot2 <- EC_df_plot %>%
+  dplyr::mutate(
+    NAME_short = dplyr::case_when(
+      feature == "EC.3.1.22.4" ~ "crossover junction endodeoxyribonuclease",
+      TRUE ~ NAME_short
+    )
+  )
+
+group_colors <- c(
+  "Fetal sex" = "#E69F00",
+  "Fetal sex + EGA" = "#7A5195",
+  "Interaction only" = "#CC79A7",
+  "EGA" = "#0072B2"
+)
+```
+
+
+```{r}
+EC_df_plot2 <- EC_df_plot2 %>%
+  filter(significance_group %in% c("Fetal sex", "EGA", "Fetal sex + EGA")) %>%
+  dplyr::arrange(
+    metadata,
+    coef
+  ) %>%
+  dplyr::mutate(
+    plot_label = paste(
+      significance_group,
+      NAME_short,
+      sep = "___GROUP___"
+    ),
+
+    plot_label = factor(
+      plot_label,
+      levels = unique(plot_label)
+    )
+  )
+
+p_EC_groups <- ggplot(
+  EC_df_plot2,
+  aes(
+    x = coef,
+    y = plot_label,
+    color = metadata
+  )
+) +
+  geom_vline(
+    xintercept = 0,
+    linetype = "dashed",
+    linewidth = 0.5
+  ) +
+
+  geom_segment(
+    aes(
+      x = 0,
+      xend = coef,
+      y = plot_label,
+      yend = plot_label
+    ),
+    color = "gray",
+    linewidth = 0.5,
+    inherit.aes = FALSE
+  ) +
+
+  geom_point(
+    aes(
+      size = neg_log10_q
+    ),
+    alpha = 0.85
+  ) +
+
+  facet_grid(
+    rows = vars(metadata),
+    scales = "free_y",
+    space = "free_y"
+  ) +
+
+  scale_y_discrete(
+    labels = function(x) {
+      sub(
+        "^.*___GROUP___",
+        "",
+        x
+      )
+    }
+  ) +
+
+  scale_color_manual(
+    values = group_colors,
+    breaks = groups_to_plot,
+    drop = FALSE
+  ) +
+
+  scale_size_continuous(
+    range = c(2, 5),
+    name = expression(-log[10](q))
+  ) +
+
+  labs(
+    x = "MaAsLin coefficient",
+    y = NULL,
+    color = "Significant association",
+    size = expression(-log[10](q))
+  ) +
+  
+  guides(
+    color = guide_legend(
+      order = 1,
+      title.position = "top",
+      override.aes = list(
+        size = 6,
+        alpha = 1
+    )
+    ),
+    size = guide_legend(
+      order = 2,
+      title.position = "top"
+    )
+  ) +
+  
+  theme_classic() +
+  
+  theme(
+    legend.position = "bottom",
+    legend.box = "horizontal",
+    legend.direction = "vertical",
+    legend.title = element_text(
+      size = 16
+    ),
+    legend.text = element_text(
+      size = 13
+    )
+  ) +
+  theme(
+    
+    # Keep column facet labels, e.g. trimester
+    strip.text.x = element_text(
+      size = 14,
+      face = "bold"
+    ),
+
+    strip.text.y = element_blank(),
+
+    axis.text.y = element_text(
+      size = 12
+    ),
+
+    axis.text.x = element_text(
+      size = 14
+    ),
+
+    axis.title.x = element_text(
+      size = 14
+    )
+  )
+
+p_EC_groups
+
+ggsave(
+  file.path(
+    plotdir,
+    "EC_significance_groups_lollipop.png"
+  ),
+  plot = p_EC_groups,
+  dpi = 600,
+  width = 8,
+  height =8,
+  units = "in",
+  limitsize = FALSE
+)
+```
+
+## plot sig ecs - final
+```{r}
+# ============================================================
+# Colors for the actual MaAsLin terms being plotted
+# ============================================================
+
+metadata_colors <- c(
+  "Fetal sex" = "#BC80BD",
+  "EGA" = "#0072B2"
+)
+# ============================================================
+# Prepare plotting data
+#
+# Keep:
+#   - Sex only
+#   - EGA only
+#   - Sex + EGA
+#
+# Exclude significant interactions
+# ============================================================
+
+EC_df_plot_filtered <- EC_df_plot %>%
+  dplyr::filter(
+    significance_group %in% c(
+      "Fetal sex",
+      "EGA",
+      "Fetal sex + EGA"
+    )
+  ) %>%
+  dplyr::filter(
+    metadata %in% c(
+      "Fetal sex",
+      "EGA"
+    )
+  ) %>%
+  dplyr::mutate(
+    metadata = factor(
+      metadata,
+      levels = c(
+        "Fetal sex",
+        "EGA"
+      )
+    )
+  )
+
+# ============================================================
+# Set enzyme ordering
+#
+# Each NAME_short gets exactly one y-axis position.
+# ============================================================
+
+EC_name_order <- EC_df_plot_filtered %>%
+  dplyr::group_by(
+    NAME_short
+  ) %>%
+  dplyr::summarise(
+    mean_coef = mean(
+      coef,
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  ) %>%
+  dplyr::arrange(
+    mean_coef
+  )
+
+EC_df_plot_filtered <- EC_df_plot_filtered %>%
+  dplyr::mutate(
+    plot_label = factor(
+      NAME_short,
+      levels = EC_name_order$NAME_short
+    )
+  )
+
+p_EC_groups <- ggplot(
+  EC_df_plot_filtered,
+  aes(
+    x = coef,
+    y = plot_label,
+    color = metadata
+  )
+) +
+
+  geom_vline(
+    xintercept = 0,
+    linetype = "dashed",
+    linewidth = 0.5
+  ) +
+
+  # ----------------------------------------------------------
+  # Lollipop stems
+  #
+  # If an enzyme has both sex and EGA associations,
+  # both stems/dots occupy the same y-axis line.
+  # ----------------------------------------------------------
+
+  geom_segment(
+    aes(
+      x = 0,
+      xend = coef,
+      y = plot_label,
+      yend = plot_label,
+      color = metadata
+    ),
+    linewidth = 0.5,
+    alpha = 0.35,
+    show.legend = FALSE
+  ) +
+
+  geom_point(
+    aes(
+      size = neg_log10_q,
+      color = metadata
+    ),
+    alpha = 0.9
+  ) +
+
+  scale_color_manual(
+    values = metadata_colors,
+    breaks = c(
+      "Fetal sex",
+      "EGA"
+    ),
+    drop = FALSE
+  ) +
+
+  scale_size_continuous(
+    range = c(
+      2,
+      5
+    ),
+    name = expression(-log[10](q))
+  ) +
+
+  labs(
+    x = "MaAsLin coefficient",
+    y = NULL,
+    color = "Significant association",
+    size = expression(-log[10](q))
+  ) +
+
+  guides(
+    color = guide_legend(
+      order = 1,
+      title.position = "top",
+      override.aes = list(
+        size = 6,
+        alpha = 1
+    )
+    ),
+    size = guide_legend(
+      order = 2,
+      title.position = "top"
+    )
+  ) +
+  
+  theme_classic() +
+  
+  theme(
+    legend.position = "bottom",
+    legend.box = "horizontal",
+    legend.direction = "vertical",
+    legend.title = element_text(
+      size = 16
+    ),
+    axis.text.x = element_text(
+      size = 14
+    ),
+    legend.text = element_text(
+      size = 13
+    ),
+    axis.text.y = element_text(
+       size = 12
+     ),
+    axis.title.x = element_text(
+      size = 14
+    )
+  )
+  # +
+  # 
+  # theme(
+  #   legend.position = "bottom",
+  #   legend.box = "horizontal",
+  # 
+
+
+p_EC_groups
+
+ggsave(
+  file.path(
+    plotdir,
+    "EC_significance_groups_lollipop.png"
+  ),
+  plot = p_EC_groups,
+  dpi = 600,
+  width = 8,
+  height =8,
+  units = "in",
+  limitsize = FALSE
+)
+```
+
+
+
+
+
+## trimester plots - final
+```{r}
+library(ggh4x)
+
+all_sig_sex_int <- all_sig_final %>%
+  filter(metadata == "sex_x_ega")
+
+ECs_to_plot <- all_sig_sex_int$feature
+# ============================================================
+# 5. Extract coefficients needed to calculate
+#    conditional fetal-sex effect
+#
+# NOTE:
+# gest_week_s determines which ECs are included/grouped,
+# but it is NOT part of the conditional fetal-sex equation.
+#
+# Conditional sex effect =
+# beta_sex + beta_sex_ega * gest_week_s
+# ============================================================
+
+sex_coefficients <- all_maaslin %>%
+  dplyr::mutate(
+    metadata = trimws(as.character(metadata)),
+    feature = as.character(feature),
+    coef = as.numeric(coef)
+  ) %>%
+  dplyr::filter(
+    metadata %in% c(
+      "fetal_sex_binary",
+      "sex_x_ega"
+    )
+  ) %>%
+  dplyr::select(
+    feature,
+    metadata,
+    coef
+  ) %>%
+  dplyr::distinct() %>%
+  tidyr::pivot_wider(
+    names_from = metadata,
+    values_from = coef
+  ) %>%
+  dplyr::rename(
+    beta_sex = fetal_sex_binary,
+    beta_sex_ega = sex_x_ega
+  ) %>%
+  dplyr::filter(
+    feature %in% ECs_to_plot
+  )
+
+
+# ============================================================
+# 6. Check that all selected ECs have coefficients
+# ============================================================
+
+missing_coefs <- setdiff(
+  ECs_to_plot,
+  sex_coefficients$feature
+)
+
+if (length(missing_coefs) > 0) {
+  warning(
+    length(missing_coefs),
+    " selected ECs are missing sex/interaction coefficients."
+  )
+}
+
+# ============================================================
+# 8. Participant-level metadata
+# ============================================================
+
+participant_meta <- input_meta %>%
+  tibble::rownames_to_column(
+    "sample_id"
+  ) %>%
+  dplyr::mutate(
+    fetal_sex = dplyr::case_when(
+      fetal_sex_binary == 0 ~ "Male",
+      fetal_sex_binary == 1 ~ "Female",
+      TRUE ~ NA_character_
+    ),
+
+    fetal_sex = factor(
+      fetal_sex,
+      levels = c(
+        "Male",
+        "Female"
+      )
+    ),
+
+    trimester = dplyr::case_when(
+      Gestation_week < 14 ~
+        "Trimester 1",
+
+      Gestation_week >= 14 &
+        Gestation_week < 28 ~
+        "Trimester 2",
+
+      Gestation_week >= 28 ~
+        "Trimester 3",
+
+      TRUE ~ NA_character_
+    ),
+
+    trimester = factor(
+      trimester,
+      levels = c(
+        "Trimester 1",
+        "Trimester 2",
+        "Trimester 3"
+      )
+    )
+  )
+
+# ============================================================
+# Add EC annotations/significance group to coefficient table
+# ============================================================
+
+EC_annotation_df <- EC_df_plot %>%
+  dplyr::select(
+    feature,
+    NAME_short,
+    significance_group
+  ) %>%
+  dplyr::distinct()
+
+sex_coefficients <- sex_coefficients %>%
+  dplyr::left_join(
+    EC_annotation_df,
+    by = "feature"
+  )
+
+# ============================================================
+# 9. Generate participant-specific conditional sex effects
+#
+# THIS MUST BE REBUILT HERE.
+#
+# Do not reuse sex_effect_participant from the first
+# sex_x_ega-only plot.
+# ============================================================
+
+sex_effect_participant <- sex_coefficients %>%
+  tidyr::crossing(
+    participant_meta
+  ) %>%
+  dplyr::mutate(
+    effective_sex_coef =
+      beta_sex +
+      beta_sex_ega * as.numeric(gest_week_s)
+  ) %>%
+  dplyr::filter(
+    !is.na(trimester),
+    !is.na(fetal_sex),
+    !is.na(effective_sex_coef),
+    !is.na(significance_group),
+    !is.na(NAME_short)
+  )
+
+
+# ============================================================
+# 10. Verify that all significance groups are represented
+# ============================================================
+
+group_counts <- sex_effect_participant %>%
+  dplyr::distinct(
+    feature,
+    significance_group
+  ) %>%
+  dplyr::count(
+    significance_group,
+    name = "n_ECs"
+  )
+
+print(group_counts)
+
+
+# ============================================================
+# 11. Define EC ordering
+#
+# Use the sex × EGA coefficient as the ordering variable
+# when available.
+#
+# Because the plotting ID includes significance group,
+# ECs remain separated correctly across facet groups.
+# ============================================================
+
+plot_order_df <- sex_coefficients %>%
+  dplyr::select(
+    feature,
+    NAME_short,
+    significance_group,
+    beta_sex_ega
+  ) %>%
+  dplyr::distinct() %>%
+  dplyr::arrange(
+    significance_group,
+    beta_sex_ega
+  ) %>%
+  dplyr::mutate(
+    plot_id = paste(
+      significance_group,
+      feature,
+      sep = "___GROUP___"
+    )
+  )
+
+plot_levels <- unique(
+  plot_order_df$plot_id
+)
+
+
+# ============================================================
+# 12. Apply plotting ID/order
+# ============================================================
+
+sex_effect_participant <- sex_effect_participant %>%
+  dplyr::mutate(
+    plot_id = paste(
+      significance_group,
+      feature,
+      sep = "___GROUP___"
+    ),
+
+    plot_id = factor(
+      plot_id,
+      levels = plot_levels
+    )
+  )
+
+
+# ============================================================
+# 13. Taxonomy display labels
+# ============================================================
+
+plot_labels <- setNames(
+  plot_order_df$NAME_short,
+  plot_order_df$plot_id
+)
+
+
+# ============================================================
+# 14. Calculate mean conditional effect within trimester
+# ============================================================
+
+sex_effect_participant <- sex_effect_participant %>%
+  dplyr::group_by(
+    plot_id,
+    trimester
+  ) %>%
+  dplyr::mutate(
+    mean_effective_coef = mean(
+      effective_sex_coef,
+      na.rm = TRUE
+    ),
+
+    mean_direction = dplyr::if_else(
+      mean_effective_coef < 0,
+      "Mean < 0",
+      "Mean > 0"
+    )
+  ) %>%
+  dplyr::ungroup()
+
+
+# ============================================================
+# Dummy data for significance-group legend
+# ============================================================
+
+legend_group_df <- sex_effect_participant %>%
+  dplyr::distinct(
+    significance_group
+  ) %>%
+  dplyr::filter(
+    !is.na(significance_group)
+  )
+
+# ============================================================
+# Plot
+# ============================================================
+
+p <- ggplot(
+  sex_effect_participant,
+  aes(
+    x = effective_sex_coef,
+    y = plot_id
+  )
+) +
+  geom_boxplot(
+    aes(
+      fill = mean_direction
+    ),
+    width = 0.65,
+    outlier.shape = NA
+  ) +
+
+  geom_jitter(
+    width = 0,
+    height = 0.08,
+    size = 1,
+    alpha = 0.4,
+    color = "grey30"
+  ) +
+
+  # Invisible points used only to create significance-group legend
+  geom_point(
+    data = legend_group_df,
+    aes(
+      x = Inf,
+      y = Inf,
+      color = significance_group
+    ),
+    inherit.aes = FALSE,
+    alpha = 0
+  ) +
+
+  geom_vline(
+    xintercept = 0,
+    color = "darkgrey",
+    linewidth = 0.5
+  ) +
+
+  ggh4x::facet_grid2(
+    rows = vars(significance_group),
+    cols = vars(trimester),
+    scales = "free_y",
+    space = "free_y",
+    # strip = ggh4x::strip_themed(
+    #   background_y = ggh4x::elem_list_rect(
+    #     fill = unname(group_colors),
+    #     color = NA
+    #   ),
+    #   text_y = ggh4x::elem_list_text(
+    #     colour = "transparent",
+    #     size = 1,
+    #     hjust = 0.5,
+    #     vjust = 0.5
+    #   )
+    # )
+  ) +
+
+  scale_fill_manual(
+    values = c(
+      "Mean < 0" = "#50B93A",
+      "Mean > 0" = "#9C7FB9"
+    ),
+    drop = FALSE
+  ) +
+
+  scale_color_manual(
+    values = group_colors,
+    breaks = levels(
+      sex_effect_participant$significance_group
+    ),
+    drop = FALSE
+  ) +
+
+  scale_y_discrete(
+    labels = plot_labels
+  ) +
+
+  labs(
+    x = "Conditional fetal sex effect (Female - Male)",
+    y = "",
+    color = "Significant association",
+    fill = "Mean coefficient"
+  ) +
+
+  guides(
+    color = guide_legend(
+      order = 1,
+      title.position = "top",
+      override.aes = list(
+        alpha = 1,
+        size = 7,
+        shape = 15
+      )
+    ),
+
+    fill = guide_legend(
+      order = 2,
+      title.position = "top",
+      override.aes = list(
+        size = 6
+      )
+    )
+  ) +
+
+  theme_classic() +
+  theme(
+    legend.position = "bottom",
+    legend.box = "horizontal",
+    legend.direction = "vertical",
+    legend.title = element_text(
+      size = 16
+    ),
+    legend.text = element_text(
+      size = 14
+    )
+  ) +
+  
+  theme(
+    axis.text.y = element_text(
+      size = 14
+    ),
+
+    axis.text.x = element_text(
+      size = 14
+    ),
+
+    axis.title.x = element_text(
+      size = 15
+    ),
+
+    strip.text.x = element_text(
+      size = 14,
+      face = "bold"
+    ),
+
+    strip.text.y = element_blank(),
+    strip.background.y = element_blank()
+    ) +
+
+    guides(
+    fill = guide_legend(
+      order = 1
+    ),
+
+    color = guide_legend(
+      order = 2,
+      override.aes = list(
+        alpha = 1,
+        size = 5,
+        shape = 15
+      )
+    )
+  )
+
+  # theme(
+  #   axis.text.y = element_text(
+  #     size = 11
+  #   ),
+  # 
+  #   axis.text.x = element_text(
+  #     size = 11
+  #   ),
+  # 
+  #   axis.title.x = element_text(
+  #     size = 13
+  #   ),
+  # 
+  #   strip.text = element_text(
+  #     size = 12,
+  #     face = "bold"
+  #   ),
+  # 
+  #   legend.title = element_text(
+  #     size = 12
+  #   ),
+  # 
+  #   legend.text = element_text(
+  #     size = 11
+  #   )
+  # )
+
+p
+
+
+ggsave(file.path(plotdir, "ECs_sex_adjusted_box_per_tri.png"), plot = p, dpi = 600, 
+       width = 12, height = 8, units = "in", limitsize = FALSE)
+```
+
+
+# Pathways
+## abundance filtering
+```{r}
+# ============================================================
+# ── Remove of MetaCyc's with low prevalance ─────────────────
+# ============================================================
+pathway_Sample <- path_abun_unstrat
+colSums_pathways<-apply(pathway_Sample,2,function(x) sum(as.numeric(x),na.rm=TRUE))
+rel_abun<-sweep(pathway_Sample,2,colSums_pathways,FUN="/")
+#rel_abun[!is.finite(rel_abun)]=0
+hist(as.numeric(unlist(rel_abun)), breaks=20, xlim = c(0.001,0.035), ylim=c(0,10000))
+rel_abun_filter<-apply(rel_abun,1,function(x){
+    rr<-ifelse (all(as.numeric(x)<=1E-3),FALSE,TRUE)}) # based on histogram
+pathway_Sample<-pathway_Sample[rel_abun_filter,]
+```
+
+## maaslin2
+```{r}
+# input_data <- t(picrust.kegg)
+
+fixed_effects <- c(
+  "fetal_sex_binary",
+  "gest_week_s",
+  "sex_x_ega",
+  "age_s",
+  "bmi_s",
+  "parity_s",
+  "Residency_status"
+)
+
+## Fit data
+fit_data <- Maaslin2(
+  input_data = t(pathway_Sample),
+  input_metadata = input_meta,
+  min_abundance = 0,
+  min_prevalence = 0.9,
+  normalization = "CLR",
+  transform = "NONE",
+  standardize = FALSE,
+  analysis_method = "LM",
+  output = file.path(outdir, "pathways"),
+  fixed_effects = fixed_effects,
+  plot_heatmap = FALSE,
+  plot_scatter = FALSE,
+  #save_models = TRUE
+  #cores = 4
+)
+```
+## signficant pathways
+```{r}
+# load maaslin2 results
+all_maaslin <- read.csv(file = file.path(outdir, "pathways", "all_results.tsv"), sep = "\t")
+
+all_sig <- all_maaslin %>%
+  filter(qval < 0.25) %>%
+  filter(metadata %in% c("fetal_sex_binary", "gest_week_s", "sex_x_ega")) 
+
+write.csv(all_sig, file = file.path(outdir, "pathways", "pathways_sig.csv"))
+
+selected_kegg_ids <- all_sig$feature
+```
+
+## add pathway information - ggpicrust2
+```{r}
+library(ggpicrust2)
+data("metacyc_reference", package = "ggpicrust2")
+
+head(metacyc_reference)
+
+metacyc_reference_match <- metacyc_reference %>%
+  mutate(
+    feature_match = make.names(id)
+  )
+
+any(
+  metacyc_reference_match$feature_match ==
+    "PWY.5345"
+)
+
+sum(
+  all_sig$feature %in%
+    metacyc_reference_match$feature_match
+)
+
+all_sig_annotated <- all_sig %>%
+  left_join(
+    metacyc_reference_match %>%
+      dplyr::select(
+        feature_match,
+        metacyc_id = id,
+        description
+      ),
+    by = c(
+      "feature" = "feature_match"
+    )
+  )
+
+write.csv(all_sig_annotated, file = file.path(outdir, "pathways", "pathways_df_sex.csv"))
+```
+
+
+## plot sig pathways - sex, sex + gest week, interaction
+```{r}
+# save all sig final
+all_sig_final <- read.csv(file = file.path(outdir, "pathways", "pathways_df_sex.csv"), row.names = 1)
+
+all_sig_sex_int <- all_sig_final %>%
+  filter(metadata %in% c("fetal_sex_binary", "gest_week_s", "sex_x_ega"))
+```
+
+```{r}
+pathways_significance_groups <- all_sig_final %>%
+ dplyr::distinct(
+    feature,
+    metadata
+  ) %>%
+  dplyr::mutate(
+    sig_sex = metadata == "fetal_sex_binary",
+    sig_gest_week = metadata == "gest_week_s",
+    sig_interaction = metadata == "sex_x_ega"
+  ) %>%
+  dplyr::group_by(feature) %>%
+  dplyr::summarise(
+    sig_sex = any(sig_sex),
+    sig_gest_week = any(sig_gest_week),
+    sig_interaction = any(sig_interaction),
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+    significance_group = dplyr::case_when(
+
+      # Significant interaction takes priority,
+      # regardless of whether main effects are also significant
+      sig_interaction ~
+        "Fetal sex x EGA interaction",
+
+      # Sex only
+      sig_sex &
+        !sig_gest_week &
+        !sig_interaction ~
+        "Fetal sex",
+
+      # EGA only
+      !sig_sex &
+        sig_gest_week &
+        !sig_interaction ~
+        "EGA",
+
+      # Both main effects significant, but interaction not significant
+      sig_sex &
+        sig_gest_week &
+        !sig_interaction ~
+        "Fetal sex + EGA",
+
+      TRUE ~ "Other"
+    )
+  )
+
+pathways_significance_groups <- pathways_significance_groups %>%
+  dplyr::mutate(
+    significance_group = factor(
+      significance_group,
+      levels = c(
+        "Fetal sex",
+        "EGA",
+        "Fetal sex + EGA",
+        "Fetal sex x EGA interaction"
+      )
+    )
+  )
+
+pathways_significance_groups %>%
+  dplyr::count(
+    significance_group,
+    name = "n_pathwayss"
+  ) %>%
+  dplyr::arrange(
+    dplyr::desc(n_pathwayss)
+  )
+```
+
+```{r}
+library(grid)
+# ============================================================
+# Keep only the four significance groups to plot
+# ============================================================
+
+groups_to_plot <- c(
+  "Fetal sex",
+  "EGA"#,
+ # "Fetal sex + EGA",
+#  "Fetal sex x EGA interaction"
+)
+
+# don't plot gestational week coefficients 
+
+# ============================================================
+# Prepare plotting dataframe
+# ============================================================
+
+pathways_df_plot <- all_sig_sex_int %>%
+  dplyr::mutate(
+    # --------------------------------------------------------
+    # Clean metadata names
+    # --------------------------------------------------------
+    metadata = dplyr::recode(
+      metadata,
+      "fetal_sex_binary" = "Fetal sex",
+      "gest_week_s" = "EGA"#,
+    #  "sex_x_ega" = "Sex × EGA interaction"
+    ),
+
+    metadata = factor(
+      metadata,
+      levels = c(
+        "Fetal sex",
+        "EGA",
+        "Sex × EGA interaction"
+      )
+    ),
+
+    # Useful for optional point-size mapping
+    neg_log10_q = -log10(qval),
+
+    direction = if_else(
+      coef >= 0,
+      "Positive",
+      "Negative"
+    )
+  ) %>%
+  dplyr::left_join(
+    pathways_significance_groups %>%
+      dplyr::select(
+        feature,
+        significance_group
+      ),
+    by = "feature"
+  ) %>%
+  dplyr::filter(
+    significance_group %in% groups_to_plot
+  ) %>%
+  dplyr::mutate(
+    significance_group = factor(
+      significance_group,
+      levels = groups_to_plot
+    ),
+
+    neg_log10_q = -log10(qval),
+
+    direction = dplyr::if_else(
+      coef >= 0,
+      "Positive",
+      "Negative"
+    )
+  )
+
+group_colors <- c(
+  "Fetal sex" = "#BC80BD",
+ # "Fetal sex + EGA" = "#7A5195",
+  "EGA" = "#0072B2",
+  "Fetal sex x EGA interaction" = "#0072B2"
+)
+
+pathways_df_plot <- pathways_df_plot %>%
+  dplyr::arrange(
+    significance_group,
+    coef
+  ) %>%
+  dplyr::mutate(
+    plot_label = paste(
+      significance_group,
+      description,
+      sep = "___GROUP___"
+    ),
+
+    plot_label = factor(
+      plot_label,
+      levels = unique(plot_label)
+    )
+  )
+
+p_pathways_groups <- ggplot(
+  pathways_df_plot,
+  aes(
+    x = coef,
+    y = plot_label,
+    color = significance_group
+  )
+) +
+  geom_vline(
+    xintercept = 0,
+    linetype = "dashed",
+    linewidth = 0.5
+  ) +
+
+  geom_segment(
+    aes(
+      x = 0,
+      xend = coef,
+      y = plot_label,
+      yend = plot_label
+    ),
+    color = "gray",
+    linewidth = 0.5,
+    inherit.aes = FALSE
+  ) +
+
+  geom_point(
+    aes(
+      size = neg_log10_q
+    ),
+    alpha = 0.85
+  ) +
+
+  facet_grid(
+    rows = vars(significance_group),
+    scales = "free_y",
+    space = "free_y"
+  ) +
+
+  scale_y_discrete(
+    labels = function(x) {
+      sub(
+        "^.*___GROUP___",
+        "",
+        x
+      )
+    }
+  ) +
+
+  scale_color_manual(
+    values = group_colors,
+    breaks = groups_to_plot,
+    drop = FALSE
+  ) +
+
+  scale_size_continuous(
+    range = c(2, 5),
+    name = expression(-log[10](q))
+  ) +
+
+  labs(
+    x = "MaAsLin coefficient",
+    y = NULL,
+    color = "Significant association",
+    size = expression(-log[10](q))
+  ) +
+  
+  guides(
+    color = guide_legend(
+      order = 1,
+      title.position = "top",
+      override.aes = list(
+        size = 6,
+        alpha = 1
+    )
+    ),
+    size = guide_legend(
+      order = 2,
+      title.position = "top"
+    )
+  ) +
+  
+  theme_classic() +
+  
+  theme(
+    legend.position = "bottom",
+    legend.box = "horizontal",
+    legend.direction = "vertical",
+    legend.title = element_text(
+      size = 16
+    ),
+    legend.text = element_text(
+      size = 13
+    )
+  ) +
+  theme(
+    
+    # Keep column facet labels, e.g. trimester
+    strip.text.x = element_text(
+      size = 14,
+      face = "bold"
+    ),
+
+    strip.text.y = element_blank(),
+
+    axis.text.y = element_text(
+      size = 12
+    ),
+
+    axis.text.x = element_text(
+      size = 14
+    ),
+
+    axis.title.x = element_text(
+      size = 14
+    )
+  )
+
+p_pathways_groups
+
+ggsave(
+  file.path(
+    plotdir,
+    "pathways_significance_groups_lollipop.png"
+  ),
+  plot = p_pathways_groups,
+  dpi = 600,
+  width = 10,
+  height =8,
+  units = "in",
+  limitsize = FALSE
+)
+```
+
+
+
+
+
+
+
+
+
+```{r}
+metadata_colors <- c(
+  "Fetal sex" = "#FDB462",
+  "Gestational week" = "#8DD3C7",
+  "Sex × gestational week" = "#BC80BD"
+)
+
+# ============================================================
+# Prepare plotting dataframe
+# ============================================================
+
+pathway_plot_df <- all_sig_annotated %>%
+  mutate(
+    # --------------------------------------------------------
+    # Clean metadata names
+    # --------------------------------------------------------
+    metadata = recode(
+      metadata,
+      "fetal_sex_binary" = "Fetal sex",
+      "gest_week_s" = "Gestational week",
+      "sex_x_ega" = "Sex × gestational week"
+    ),
+
+    metadata = factor(
+      metadata,
+      levels = c(
+        "Fetal sex",
+        "Gestational week",
+        "Sex × gestational week"
+      )
+    ),
+
+    # Useful for optional point-size mapping
+    neg_log10_q = -log10(qval),
+
+    direction = if_else(
+      coef >= 0,
+      "Positive",
+      "Negative"
+    )
+  )
+
+# ============================================================
+# Plot 1: short pathway names
+# ============================================================
+
+name_plot_df <- pathway_plot_df %>%
+  arrange(
+    metadata,
+    coef
+  ) %>%
+  mutate(
+    plot_label = paste(
+      metadata,
+      feature,
+      sep = "___META___"
+    ),
+    plot_label = factor(
+      plot_label,
+      levels = unique(plot_label)
+    )
+  )
+
+p_names <- ggplot(
+  name_plot_df,
+  aes(
+    x = coef,
+    y = plot_label,
+    color = metadata
+  )
+) +
+  geom_vline(
+    xintercept = 0,
+    linetype = "dashed",
+    linewidth = 0.5
+  ) +
+  # Lollipop stems
+  geom_segment(
+    data = name_plot_df,
+    aes(
+      x = 0,
+      xend = coef,
+      y = plot_label,
+      yend = plot_label
+    ),
+    color = "gray",
+    linewidth = 0.5,
+    inherit.aes = FALSE
+  ) +
+
+  # Lollipop points
+  geom_point(
+    aes(size = neg_log10_q),
+    alpha = 0.85
+  ) +
+  facet_grid(
+    rows = vars(metadata),
+    scales = "free_y",
+    space = "free_y"
+  ) +
+  scale_y_discrete(
+    labels = function(x) {
+      sub(
+        "^.*___META___",
+        "",
+        x
+      )
+    }
+  ) +
+  scale_color_manual(
+    values = metadata_colors
+  ) +
+  scale_size_continuous(
+    range = c(2, 5),
+    name = expression(-log[10](q))
+  ) +
+  labs(
+    x = "MaAsLin coefficient",
+    y = NULL,
+    title = "Predicted differential pathways"
+  ) +
+  theme_classic() +
+  theme(
+    legend.position = "right",
+    strip.text.y = element_text(
+      face = "bold",
+      size = 11
+    ),
+    axis.text.y = element_text(
+      size = 8
+    ),
+    axis.title.x = element_text(
+      size = 11
+    )
+  )
+
+p_names
+
+# ============================================================
+# Plot 2: pathway description names
+# ============================================================
+
+name_plot_df <- pathway_plot_df %>%
+  arrange(
+    metadata,
+    coef
+  ) %>%
+  mutate(
+    plot_label = paste(
+      metadata,
+      description,
+      sep = "___META___"
+    ),
+    plot_label = factor(
+      plot_label,
+      levels = unique(plot_label)
+    )
+  )
+
+p_desc <- ggplot(
+  name_plot_df,
+  aes(
+    x = coef,
+    y = plot_label,
+    color = metadata
+  )
+) +
+  geom_vline(
+    xintercept = 0,
+    linetype = "dashed",
+    linewidth = 0.5
+  ) +
+  # Lollipop stems
+  geom_segment(
+    data = name_plot_df,
+    aes(
+      x = 0,
+      xend = coef,
+      y = plot_label,
+      yend = plot_label
+    ),
+    color = "gray",
+    linewidth = 0.5,
+    inherit.aes = FALSE
+  ) +
+
+  # Lollipop points
+  geom_point(
+    aes(size = neg_log10_q),
+    alpha = 0.85
+  ) +
+  facet_grid(
+    rows = vars(metadata),
+    scales = "free_y",
+    space = "free_y"
+  ) +
+  scale_y_discrete(
+    labels = function(x) {
+      sub(
+        "^.*___META___",
+        "",
+        x
+      )
+    }
+  ) +
+  scale_color_manual(
+    values = metadata_colors
+  ) +
+  scale_size_continuous(
+    range = c(2, 5),
+    name = expression(-log[10](q))
+  ) +
+  labs(
+    x = "MaAsLin coefficient",
+    y = NULL,
+    title = "Predicted differential pathways"
+  ) +
+  theme_classic() +
+  theme(
+    legend.position = "right",
+    strip.text.y = element_text(
+      face = "bold",
+      size = 11
+    ),
+    axis.text.y = element_text(
+      size = 8
+    ),
+    axis.title.x = element_text(
+      size = 11
+    )
+  )
+
+p_desc
+
+ggsave(file.path(plotdir, "pathway_names_lollipop.png"), plot = p_names, dpi = 600, 
+       width = 8, height = 15, units = "in", limitsize = FALSE)
+
+ggsave(file.path(plotdir, "pathway_description_lollipop.png"), plot = p_names, dpi = 600, 
+       width = 8, height = 15, units = "in", limitsize = FALSE)
+```
+
+## plot sig ecs - final
+```{r}
+# ============================================================
+# Colors for the actual MaAsLin terms being plotted
+# ============================================================
+
+metadata_colors <- c(
+  "Fetal sex" = "#BC80BD",
+  "EGA" = "#0072B2"
+)
+# ============================================================
+# Prepare plotting data
+#
+# Keep:
+#   - Sex only
+#   - EGA only
+#   - Sex + EGA
+#
+# Exclude significant interactions
+# ============================================================
+
+pathway_df_plot_filtered <- pathway_df_plot %>%
+  dplyr::filter(
+    significance_group %in% c(
+      "Fetal sex",
+      "EGA",
+      "Fetal sex + EGA"
+    )
+  ) %>%
+  dplyr::filter(
+    metadata %in% c(
+      "Fetal sex",
+      "EGA"
+    )
+  ) %>%
+  dplyr::mutate(
+    metadata = factor(
+      metadata,
+      levels = c(
+        "Fetal sex",
+        "EGA"
+      )
+    )
+  )
+
+# ============================================================
+# Set enzyme ordering
+#
+# Each NAME_short gets exactly one y-axis position.
+# ============================================================
+
+pathway_name_order <- pathway_df_plot_filtered %>%
+  dplyr::group_by(
+    NAME_short
+  ) %>%
+  dplyr::summarise(
+    mean_coef = mean(
+      coef,
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  ) %>%
+  dplyr::arrange(
+    mean_coef
+  )
+
+pathway_df_plot_filtered <- pathway_df_plot_filtered %>%
+  dplyr::mutate(
+    plot_label = factor(
+      NAME_short,
+      levels = pathway_name_order$NAME_short
+    )
+  )
+
+p_pathway_groups <- ggplot(
+  pathway_df_plot_filtered,
+  aes(
+    x = coef,
+    y = plot_label,
+    color = metadata
+  )
+) +
+
+  geom_vline(
+    xintercept = 0,
+    linetype = "dashed",
+    linewidth = 0.5
+  ) +
+
+  # ----------------------------------------------------------
+  # Lollipop stems
+  #
+  # If an enzyme has both sex and EGA associations,
+  # both stems/dots occupy the same y-axis line.
+  # ----------------------------------------------------------
+
+  geom_segment(
+    aes(
+      x = 0,
+      xend = coef,
+      y = plot_label,
+      yend = plot_label,
+      color = metadata
+    ),
+    linewidth = 0.5,
+    alpha = 0.35,
+    show.legend = FALSE
+  ) +
+
+  geom_point(
+    aes(
+      size = neg_log10_q,
+      color = metadata
+    ),
+    alpha = 0.9
+  ) +
+
+  scale_color_manual(
+    values = metadata_colors,
+    breaks = c(
+      "Fetal sex",
+      "EGA"
+    ),
+    drop = FALSE
+  ) +
+
+  scale_size_continuous(
+    range = c(
+      2,
+      5
+    ),
+    name = expression(-log[10](q))
+  ) +
+
+  labs(
+    x = "MaAsLin coefficient",
+    y = NULL,
+    color = "Significant association",
+    size = expression(-log[10](q))
+  ) +
+
+  guides(
+    color = guide_legend(
+      order = 1,
+      title.position = "top",
+      override.aes = list(
+        size = 6,
+        alpha = 1
+    )
+    ),
+    size = guide_legend(
+      order = 2,
+      title.position = "top"
+    )
+  ) +
+  
+  theme_classic() +
+  
+  theme(
+    legend.position = "bottom",
+    legend.box = "horizontal",
+    legend.direction = "vertical",
+    legend.title = element_text(
+      size = 16
+    ),
+    axis.text.x = element_text(
+      size = 14
+    ),
+    legend.text = element_text(
+      size = 13
+    ),
+    axis.text.y = element_text(
+       size = 12
+     ),
+    axis.title.x = element_text(
+      size = 14
+    )
+  )
+  # +
+  # 
+  # theme(
+  #   legend.position = "bottom",
+  #   legend.box = "horizontal",
+  # 
+
+
+p_pathway_groups
+
+ggsave(
+  file.path(
+    plotdir,
+    "pathway_significance_groups_lollipop.png"
+  ),
+  plot = p_pathway_groups,
+  dpi = 600,
+  width = 8,
+  height =8,
+  units = "in",
+  limitsize = FALSE
+)
+```
+
+
+
+
+
+
+
+
+
+
+## trimester plots
+```{r}
+# ============================================================
+# 1. Put MaAsLin2 coefficients into long format
+#
+# Assumes:
+#   metadata   / coef
+#   metadata.1 / coef.1
+#   metadata.2 / coef.2
+#
+# correspond to the three terms in filt_data.
+# ============================================================
+
+# load filtered maaslin2 data
+pathways_abundance <- read.csv(file = file.path(outdir, "pathways", "features", "filtered_data.tsv"), sep = "\t", row.names = 1)
+all_sig_final <- all_sig_annotated
+# ============================================================
+# 1. Extract gestational-age and sex x EGA coefficients
+# ============================================================
+
+unique(all_maaslin$metadata)
+
+table(all_maaslin$metadata, useNA = "ifany")
+
+pathways_coefficients <- all_maaslin %>%
+  mutate(
+    metadata = trimws(as.character(metadata)),
+    feature = as.character(feature),
+    coef = as.numeric(coef)
+  ) %>%
+  filter(
+    metadata %in% c(
+      "gest_week_s",
+      "sex_x_ega"
+    )
+  ) %>%
+  select(
+    feature,
+    metadata,
+    coef
+  ) %>%
+  distinct() %>%
+  pivot_wider(
+    names_from = metadata,
+    values_from = coef
+  ) %>%
+  dplyr::rename(
+    beta_ega = gest_week_s,
+    beta_sex_ega = sex_x_ega
+  )
+
+colnames(pathways_coefficients)
+
+pathwayss_to_plot <- unique(all_sig_final$feature)
+
+unique(all_sig_final$metadata)
+colnames(all_sig_final)
+
+pathways_coeffs_sig <- pathways_coefficients %>%
+  filter(feature %in% pathwayss_to_plot)
+```
+
+```{r}
+# ============================================================
+# 2. Convert pathways abundance matrix to long format
+# ============================================================
+
+pathways_long <- as.data.frame(
+  pathways_abundance,
+  check.names = FALSE
+) %>%
+  rownames_to_column("sample_id") %>%
+  pivot_longer(
+    cols = -sample_id,
+    names_to = "feature",
+    values_to = "abundance"
+  )
+```
+
+```{r}
+# ============================================================
+# 3. Prepare sample metadata
+# ============================================================
+
+metadata_plot <- input_meta %>%
+  rownames_to_column("sample_id") %>%
+  mutate(
+    trimester = case_when(
+      Gestation_week < 14 ~ "Trimester 1",
+      Gestation_week >= 14 & Gestation_week < 28 ~ "Trimester 2",
+      Gestation_week >= 28 ~ "Trimester 3",
+      TRUE ~ NA_character_
+    ),
+    trimester = factor(
+      trimester,
+      levels = c(
+        "Trimester 1",
+        "Trimester 2",
+        "Trimester 3"
+      )
+    )
+  )
+```
+
+```{r}
+# ============================================================
+# 4. Adjust abundance for EGA and Sex x EGA
+# ============================================================
+
+plot_data <- pathways_long %>%
+  inner_join(
+    metadata_plot,
+    by = "sample_id"
+  ) %>%
+  inner_join(
+    pathways_coefficients,
+    by = "feature"
+  ) %>%
+  mutate(
+    abundance_adjusted =
+      abundance -
+      beta_ega * gest_week_s -
+      beta_sex_ega * sex_x_ega
+  )
+
+plot_data <- plot_data %>%
+  mutate(
+    fetal_sex = case_when(
+      fetal_sex_binary == 0 ~ "Male",
+      fetal_sex_binary == 1 ~ "Female",
+      TRUE ~ NA_character_
+    ),
+    fetal_sex = factor(
+      fetal_sex,
+      levels = c(
+        "Female",
+        "Male"
+      )
+    )
+  )
+```
+
+```{r}
+pathwayss_to_plot <- unique(
+  all_sig_final$feature
+)
+
+plot_data <- plot_data %>%
+  filter(
+    feature %in% pathwayss_to_plot
+  )
+
+taxonomy_labels <- all_sig_final %>%
+  select(
+    feature,
+    description
+  ) %>%
+  distinct()
+
+plot_data <- plot_data %>%
+  left_join(
+    taxonomy_labels,
+    by = "feature"
+  )
+```
+
+
+```{r}
+# ============================================================
+# 5. Violin plots for each pathways
+# ============================================================
+
+pdf(
+  file = file.path(
+    plotdir,
+    "pathways_sex_adjusted_violin_per_trimester.pdf"
+  ),
+  width = 10,
+  height = 5
+)
+
+for (cur_feature in unique(plot_data$feature)) {
+
+  plot_df <- plot_data %>%
+    filter(
+      feature == cur_feature
+    )
+
+  tax_name <- unique(
+    na.omit(plot_df$description)
+  )
+
+  if (length(tax_name) > 0) {
+    plot_title <- paste0(
+      cur_feature,
+      " - ",
+      tax_name[1]
+    )
+  } else {
+    plot_title <- cur_feature
+  }
+
+  p <- ggplot(
+    plot_df,
+    aes(
+      x = fetal_sex,
+      y = abundance_adjusted,
+      fill = fetal_sex
+    )
+  ) +
+    geom_violin(
+      trim = FALSE,
+      alpha = 0.6
+    ) +
+    geom_boxplot(
+      width = 0.12,
+      outlier.shape = NA,
+      alpha = 0.8
+    ) +
+    geom_jitter(
+      width = 0.08,
+      size = 1.5,
+      alpha = 0.5
+    ) +
+    facet_wrap(
+      ~ trimester,
+      nrow = 1
+    ) +
+    labs(
+      x = "",
+      y = "EGA-adjusted abundance",
+      title = plot_title
+    ) +
+    theme_classic() +
+    theme(
+      legend.position = "none",
+      axis.text.x = element_text(
+        size = 12
+      ),
+      axis.text.y = element_text(
+        size = 11
+      ),
+      axis.title.y = element_text(
+        size = 13
+      ),
+      strip.text = element_text(
+        size = 12
+      ),
+      plot.title = element_text(
+        size = 12
+      )
+    )
+
+  print(p)
+}
+
+dev.off()
+```
+
+
+
+
+

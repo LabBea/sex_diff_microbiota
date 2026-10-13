@@ -1,0 +1,515 @@
+---
+title: "ML_data_prep"
+author: "Blake Williams"
+date: "`r Sys.Date()`"
+output: html_document
+---
+# Load packages
+```{r setup, include=FALSE}
+library(here)
+library(tidyverse)
+library(igraph)
+library(NBZIMM)
+library(lme4)
+library(SpiecEasi)
+library(LIMON)
+library(ggeffects)
+library(car)
+library(phyloseq)
+library(metagMisc)
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Prep data
+## Load metadata
+```{r}
+# load metadata
+outdir <- here("data", "ML")
+dir.create(outdir, recursive = TRUE,
+           showWarnings = FALSE)
+
+# load metadata
+psdir <- here("data", "phyloseq")
+ps_ASVs <- readRDS(file = file.path(psdir, 'ps_css.rds'))
+
+maasdir <- here("data", "MaasLin2")
+
+input_metadata <- data.frame(ps_ASVs@sam_data) %>%
+  mutate(sex = as.factor(Infant_gender)) %>%
+  mutate(Residency_status = as.factor(case_when(Residency_status == 1 ~ 0,
+                                         Residency_status == 2 ~ 1)))
+
+rownames(input_metadata) <- input_metadata$SampleID
+
+input_metadata <- input_metadata %>%
+  dplyr::select(c("sex", "gest_week_s", "age_s", "bmi_s", "Residency_status", "parity_s", "run_accession", "SampleID")) #%>%
+  # mutate(Time = 1)
+
+#sample_data(ps_filtered) <- metadata
+```
+
+# Model 1 - covariates only
+```{r}
+covariate_model <- input_metadata %>%
+  dplyr::select(c("sex", "gest_week_s", "age_s", "bmi_s", "Residency_status", "parity_s"))
+
+ncol(covariate_model)
+
+write.csv(covariate_model, file = file.path(outdir, "model1_covariates.csv"))
+```
+
+# Model 2 - microbes + covariates
+```{r}
+# load phyloseq object
+ps.f <- readRDS(file = file.path(psdir, 'ps_css.rds'))
+
+# Extract sample names from the phyloseq object
+sample_ids <- sample_names(ps.f)
+input_metadata <- input_metadata[input_metadata$run_accession %in% sample_ids, ]
+```
+
+## use sex & sex*ega sig taxa
+### read in files
+```{r}
+sex_microbes <- read.csv(file.path(maasdir, "asvs_zinb", "sex_ega_sig_microbes.csv"), row.names = 1)
+```
+
+### prep data
+```{r}
+sig_sex_taxa <- sex_microbes %>%
+  filter(metadata %in% c("fetal_sex_binary", "sex_x_ega"))
+
+ps_ml <- prune_taxa(sig_sex_taxa$feature, ps.f)
+
+# Extract metadata and set new sample names from "SampleID" column
+sample_data(ps_ml)$SampleID <- as.character(sample_data(ps_ml)$SampleID)  # Ensure SampleID is character
+sample_names(ps_ml) <- sample_data(ps_ml)$SampleID
+
+ps_ml
+```
+
+```{r}
+ml_asvs <- data.frame(otu_table(ps_ml))
+
+# Replace zeros with a small pseudocount
+pseudocount <- min(ml_asvs[ml_asvs > 0]) / 2
+ml_asvs[ml_asvs == 0] <- pseudocount
+
+# CLR transform (apply by row)
+clr_counts <- apply(ml_asvs, 1, compositions::clr)
+
+# Convert back to data frame (optional)
+clr_counts <- as.data.frame(clr_counts)
+
+clr_counts$SampleID <- rownames(clr_counts)
+
+ncol(clr_counts)
+```
+
+
+```{r}
+# read in covariate model
+#covariate_model <- read.csv(file = here("data/ML/model1_covariates.csv"), row.names = 1)
+
+covariate_model$SampleID <- rownames(covariate_model)
+
+# Ensure both datasets have a common column for merging (e.g., "SampleID")
+clr_counts <- clr_counts %>%
+  full_join(covariate_model, by = "SampleID")
+
+rownames(clr_counts) <- clr_counts$SampleID
+
+clr_counts <- clr_counts %>%
+  dplyr::select(-SampleID)
+
+write.csv(clr_counts, file = file.path(outdir, "model2_asvs_covariates.csv"))
+```
+
+# Model 3 - kegg + covariates
+## CLR transforming using compositions
+```{r}
+## To keep dataset transformations consistent for enzymes and ASVs, we will subset the raw picrust data to include only features of interest and then clr transform that
+
+# load KO file
+picrust.kegg <- read.csv(file = here("data", "picrust2", "picrust_output_css_all",
+                                     "KO_metagenome_out",
+                                     "pred_metagenome_unstrat.tsv.gz"),
+                         sep = "\t", row.names = 1)
+
+sex_kegg <- read.csv(file = here("data/MaasLin2/picrust2_output_css_all",
+                                    "KEGG",
+                                    "significant_results.tsv"),
+                        sep = "\t")
+
+sig_sex_kegg <- sex_kegg %>%
+  filter(metadata %in% c("fetal_sex_binary", "sex_x_ega"))
+
+selected_kegg_ids <- sig_sex_kegg$feature
+
+css_filtered <- data.frame(t(picrust.kegg))
+# Filter the phyloseq object to keep only the top taxa
+css_filtered <- css_filtered[ ,selected_kegg_ids]
+
+# transpose css_filtered so KEGGs are rows and samples are columns
+#css_filtered <- t(css_filtered)
+
+# Match current rownames to metadata
+idx <- match(
+  rownames(css_filtered),
+  input_metadata$run_accession
+)
+
+# Check for unmatched samples
+if (any(is.na(idx))) {
+  stop(
+    "Some run_accession values were not found in input_metadata: ",
+    paste(
+      rownames(css_filtered)[is.na(idx)],
+      collapse = ", "
+    )
+  )
+}
+
+# Replace rownames with SampleID
+rownames(css_filtered) <- input_metadata$SampleID[idx]
+
+head(rownames(css_filtered))
+
+anyDuplicated(input_metadata$run_accession)
+anyDuplicated(input_metadata$SampleID)
+
+# Replace zeros with a small pseudocount
+pseudocount <- min(css_filtered[css_filtered > 0]) / 2
+css_filtered[css_filtered == 0] <- pseudocount
+
+# CLR transform (apply by row)
+clr_counts <- apply(css_filtered, 1, compositions::clr)
+
+# Convert back to data frame (optional)
+clr_counts <- as.data.frame(t(clr_counts))
+
+clr_counts$SampleID <- rownames(clr_counts)
+
+ncol(clr_counts)
+
+# read in covariate model
+covariate_model <- read.csv(file = here("data/ML/model1_covariates.csv"), row.names = 1)
+
+covariate_model$SampleID <- rownames(covariate_model)
+
+# Ensure both datasets have a common column for merging (e.g., "SampleID")
+clr_counts <- clr_counts %>%
+  left_join(covariate_model, by = "SampleID")
+
+rownames(clr_counts) <- clr_counts$SampleID
+
+clr_counts <- clr_counts %>%
+  dplyr::select(-SampleID)
+
+write.csv(clr_counts, file = file.path(outdir, "model3_kegg_covariates.csv"))
+```
+
+# Model 4 - enzymes + covariates
+## CLR transforming using compositions
+```{r}
+## To keep dataset transformations consistent for enzymes and ASVs, we will subset the raw picrust data to include only features of interest and then clr transform that
+
+# load KO file
+picrust.kegg <- read.csv(file = here("data", "picrust2", "picrust_output_css_all",
+                                     "EC_metagenome_out",
+                                     "pred_metagenome_unstrat.tsv.gz"),
+                         sep = "\t", row.names = 1)
+
+sex_kegg <- read.csv(file = here("data/MaasLin2/picrust2_output_css_all",
+                                    "EC",
+                                    "significant_results.tsv"),
+                        sep = "\t")
+
+sig_sex_kegg <- sex_kegg %>%
+  filter(metadata %in% c("fetal_sex_binary", "sex_x_ega"))
+
+selected_kegg_ids <- sig_sex_kegg$feature
+
+css_filtered <- data.frame(t(picrust.kegg))
+# Filter the phyloseq object to keep only the top taxa
+css_filtered <- css_filtered[ ,selected_kegg_ids]
+
+# transpose css_filtered so KEGGs are rows and samples are columns
+#css_filtered <- t(css_filtered)
+
+# Match current rownames to metadata
+idx <- match(
+  rownames(css_filtered),
+  input_metadata$run_accession
+)
+
+# Check for unmatched samples
+if (any(is.na(idx))) {
+  stop(
+    "Some run_accession values were not found in input_metadata: ",
+    paste(
+      rownames(css_filtered)[is.na(idx)],
+      collapse = ", "
+    )
+  )
+}
+
+# Replace rownames with SampleID
+rownames(css_filtered) <- input_metadata$SampleID[idx]
+
+head(rownames(css_filtered))
+
+anyDuplicated(input_metadata$run_accession)
+anyDuplicated(input_metadata$SampleID)
+
+# Replace zeros with a small pseudocount
+pseudocount <- min(css_filtered[css_filtered > 0]) / 2
+css_filtered[css_filtered == 0] <- pseudocount
+
+# CLR transform (apply by row)
+clr_counts <- apply(css_filtered, 1, compositions::clr)
+
+# Convert back to data frame (optional)
+clr_counts <- as.data.frame(t(clr_counts))
+
+clr_counts$SampleID <- rownames(clr_counts)
+ncol(clr_counts)
+
+# read in covariate model
+covariate_model <- read.csv(file = here("data/ML/model1_covariates.csv"), row.names = 1)
+
+covariate_model$SampleID <- rownames(covariate_model)
+
+# Ensure both datasets have a common column for merging (e.g., "SampleID")
+clr_counts <- clr_counts %>%
+  left_join(covariate_model, by = "SampleID")
+
+rownames(clr_counts) <- clr_counts$SampleID
+
+clr_counts <- clr_counts %>%
+  dplyr::select(-SampleID)
+
+write.csv(clr_counts, file = file.path(outdir, "model4_ec_covariates.csv"))
+```
+
+# Model 5 - pathways + covariates
+## CLR transforming using compositions
+```{r}
+## To keep dataset transformations consistent for enzymes and ASVs, we will subset the raw picrust data to include only features of interest and then clr transform that
+
+# load KO file
+picrust.kegg <- read.csv(file = here("data", "picrust2", "picrust_output_css_all",
+                                     "pathways_out",
+                                     "path_abun_unstrat.tsv.gz"),
+                         sep = "\t", row.names = 1)
+
+sex_kegg <- read.csv(file = here("data/MaasLin2/picrust2_output_css_all",
+                                    "pathways",
+                                    "significant_results.tsv"),
+                        sep = "\t")
+
+sig_sex_kegg <- sex_kegg %>%
+  filter(metadata %in% c("fetal_sex_binary", "sex_x_ega"))
+
+selected_kegg_ids <- sig_sex_kegg$feature
+
+css_filtered <- data.frame(t(picrust.kegg))
+# Filter the phyloseq object to keep only the top taxa
+css_filtered <- css_filtered[ ,selected_kegg_ids]
+
+# transpose css_filtered so KEGGs are rows and samples are columns
+#css_filtered <- t(css_filtered)
+
+# Match current rownames to metadata
+idx <- match(
+  rownames(css_filtered),
+  input_metadata$run_accession
+)
+
+# Check for unmatched samples
+if (any(is.na(idx))) {
+  stop(
+    "Some run_accession values were not found in input_metadata: ",
+    paste(
+      rownames(css_filtered)[is.na(idx)],
+      collapse = ", "
+    )
+  )
+}
+
+# Replace rownames with SampleID
+rownames(css_filtered) <- input_metadata$SampleID[idx]
+
+head(rownames(css_filtered))
+
+anyDuplicated(input_metadata$run_accession)
+anyDuplicated(input_metadata$SampleID)
+
+# Replace zeros with a small pseudocount
+pseudocount <- min(css_filtered[css_filtered > 0]) / 2
+css_filtered[css_filtered == 0] <- pseudocount
+
+# CLR transform (apply by row)
+clr_counts <- apply(css_filtered, 1, compositions::clr)
+
+# Convert back to data frame (optional)
+clr_counts <- as.data.frame(t(clr_counts))
+
+clr_counts$SampleID <- rownames(clr_counts)
+
+ncol(clr_counts)
+
+# read in covariate model
+covariate_model <- read.csv(file = here("data/ML/model1_covariates.csv"), row.names = 1)
+
+covariate_model$SampleID <- rownames(covariate_model)
+
+# Ensure both datasets have a common column for merging (e.g., "SampleID")
+clr_counts <- clr_counts %>%
+  left_join(covariate_model, by = "SampleID")
+
+rownames(clr_counts) <- clr_counts$SampleID
+
+clr_counts <- clr_counts %>%
+  dplyr::select(-SampleID)
+
+write.csv(clr_counts, file = file.path(outdir, "model5_pathways_covariates.csv"))
+```
+
+# Model 6 - combine microbes & kegg
+## Uncorrected counts
+```{r}
+asvs <- read.csv(file = here("data/ML/model2_asvs_covariates.csv"), row.names = 1)
+keggs <- read.csv(file = here("data/ML/model3_enzymes_covariates.csv"), row.names = 1)
+
+asvs <- asvs[,!(colnames(asvs) %in% c("sex", "gest_week_s", "age_s", "bmi_s", "Residency_status", "parity_s"))]
+
+
+asvs$SampleID <- rownames(asvs)
+
+keggs$SampleID <- rownames(keggs)
+
+# Merge dataframes by "SampleID" and keep only one "sex" column
+combined_df <- full_join(asvs, keggs, by = "SampleID") %>%
+  # dplyr::rename(sex = sex.y) %>%       # Rename "sex.x" back to "sex"
+  # dplyr::select(-sex.x) %>%
+  column_to_rownames(var = "SampleID")
+
+# View the merged dataframe
+head(combined_df)
+
+write.csv(combined_df, file = file.path(outdir, "model6_asvs_kegg_combined.csv"))
+```
+
+# Model 7 - combine microbes & ec
+## Uncorrected counts
+```{r}
+asvs <- read.csv(file = here("data/ML/model2_asvs_covariates.csv"), row.names = 1)
+ecs <- read.csv(file = here("data/ML/model4_ec_covariates.csv"), row.names = 1)
+
+asvs <- asvs[,!(colnames(asvs) %in% c("sex", "gest_week_s", "age_s", "bmi_s", "Residency_status", "parity_s"))]
+
+
+asvs$SampleID <- rownames(asvs)
+
+ecs$SampleID <- rownames(ecs)
+
+# Merge dataframes by "SampleID" and keep only one "sex" column
+combined_df <- full_join(asvs, ecs, by = "SampleID") %>%
+  # dplyr::rename(sex = sex.y) %>%       # Rename "sex.x" back to "sex"
+  # dplyr::select(-sex.x) %>%
+  column_to_rownames(var = "SampleID")
+
+# View the merged dataframe
+head(combined_df)
+
+write.csv(combined_df, file = file.path(outdir, "model7_asvs_ec_combined.csv"))
+```
+
+
+# Model 8 - combine microbes & pathways
+## Uncorrected counts
+```{r}
+asvs <- read.csv(file = here("data/ML/model2_asvs_covariates.csv"), row.names = 1)
+pathways <- read.csv(file = here("data/ML/model5_pathways_covariates.csv"), row.names = 1)
+
+asvs <- asvs[,!(colnames(asvs) %in% c("sex", "gest_week_s", "age_s", "bmi_s", "Residency_status", "parity_s"))]
+
+
+asvs$SampleID <- rownames(asvs)
+
+pathways$SampleID <- rownames(pathways)
+
+# Merge dataframes by "SampleID" and keep only one "sex" column
+combined_df <- full_join(asvs, pathways, by = "SampleID") %>%
+  # dplyr::rename(sex = sex.y) %>%       # Rename "sex.x" back to "sex"
+  # dplyr::select(-sex.x) %>%
+  column_to_rownames(var = "SampleID")
+
+# View the merged dataframe
+head(combined_df)
+
+write.csv(combined_df, file = file.path(outdir, "model8_asvs_pathways_combined.csv"))
+```
+
+# Model 9 - combine microbes, keggs, pathways
+## Uncorrected counts
+```{r}
+asvs <- read.csv(file = here("data/ML/model2_asvs_covariates.csv"), row.names = 1)
+keggs <- read.csv(file = here("data/ML/model3_enzymes_covariates.csv"), row.names = 1)
+pathways <- read.csv(file = here("data/ML/model5_pathways_covariates.csv"), row.names = 1)
+
+asvs <- asvs[,!(colnames(asvs) %in% c("sex", "gest_week_s", "age_s", "bmi_s", "Residency_status", "parity_s"))]
+keggs <- keggs[,!(colnames(keggs) %in% c("sex", "gest_week_s", "age_s", "bmi_s", "Residency_status", "parity_s"))]
+
+asvs$SampleID <- rownames(asvs)
+
+keggs$SampleID <- rownames(keggs)
+
+pathways$SampleID <- rownames(pathways)
+
+# Merge dataframes by "SampleID" and keep only one "sex" column
+combined_df <- asvs %>%
+  full_join(keggs, by = "SampleID") %>%
+  full_join(pathways, by = "SampleID") %>%
+  # dplyr::rename(sex = sex.y) %>%       # Rename "sex.x" back to "sex"
+  # dplyr::select(-sex.x) %>%
+  column_to_rownames(var = "SampleID")
+
+# View the merged dataframe
+head(combined_df)
+
+write.csv(combined_df, file = file.path(outdir, "model9_asvs_kegg_pathways_combined.csv"))
+```
+
+# Model 10 - combine microbes, ecs, pathways
+## Uncorrected counts
+```{r}
+asvs <- read.csv(file = here("data/ML/model2_asvs_covariates.csv"), row.names = 1)
+ecs <- read.csv(file = here("data/ML/model4_ec_covariates.csv"), row.names = 1)
+pathways <- read.csv(file = here("data/ML/model5_pathways_covariates.csv"), row.names = 1)
+
+asvs <- asvs[,!(colnames(asvs) %in% c("sex", "gest_week_s", "age_s", "bmi_s", "Residency_status", "parity_s"))]
+keggs <- keggs[,!(colnames(keggs) %in% c("sex", "gest_week_s", "age_s", "bmi_s", "Residency_status", "parity_s"))]
+
+asvs$SampleID <- rownames(asvs)
+
+ecs$SampleID <- rownames(ecs)
+pathways$SampleID <- rownames(pathways)
+
+# Merge dataframes by "SampleID" and keep only one "sex" column
+combined_df <- asvs %>%
+  full_join(ecs, by = "SampleID") %>%
+  full_join(pathways) %>%
+  # dplyr::rename(sex = sex.y) %>%       # Rename "sex.x" back to "sex"
+  # dplyr::select(-sex.x) %>%
+  column_to_rownames(var = "SampleID")
+
+# View the merged dataframe
+head(combined_df)
+
+write.csv(combined_df, file = file.path(outdir, "model10_asvs_ecs_pathways_combined.csv"))
+```

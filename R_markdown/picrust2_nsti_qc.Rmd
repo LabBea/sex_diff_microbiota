@@ -1,0 +1,300 @@
+---
+title: "picrust_nsti_qc"
+author: "Blake Williams"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(here)
+
+nsti <- read_tsv(
+  here("data", "picrust2", "picrust_output_abundance01", "marker_predicted_and_nsti.tsv.gz")
+)
+
+colnames(nsti)
+```
+```{r}
+summary(
+  nsti$metadata_NSTI
+)
+
+quantile(
+  nsti$metadata_NSTI,
+  probs = c(
+    0,
+    0.25,
+    0.50,
+    0.75,
+    0.90,
+    0.95,
+    0.99,
+    1
+  ),
+  na.rm = TRUE
+)
+
+ggplot(
+  nsti,
+  aes(x = metadata_NSTI)
+) +
+  geom_histogram(
+    bins = 50
+  ) +
+  geom_vline(
+    xintercept = 0.15,
+    linetype = "dashed"
+  ) +
+  theme_classic() +
+  labs(
+    x = "NSTI",
+    y = "Number of ASVs"
+  )
+```
+
+```{r}
+cutoffs <- c(
+  0.10,
+  0.15,
+  0.20,
+  0.50,
+  2.00
+)
+
+data.frame(
+  cutoff = cutoffs,
+  n_retained = sapply(
+    cutoffs,
+    function(x) {
+      sum(
+        nsti$metadata_NSTI <= x,
+        na.rm = TRUE
+      )
+    }
+  ),
+  proportion_retained = sapply(
+    cutoffs,
+    function(x) {
+      mean(
+        nsti$metadata_NSTI <= x,
+        na.rm = TRUE
+      )
+    }
+  )
+)
+```
+
+```{r}
+# ============================================================
+# Helper: extract sample x feature matrix from phyloseq
+# ============================================================
+
+phyloseq_to_maaslin <- function(ps) {
+
+  x <- as(
+    otu_table(ps),
+    "matrix"
+  )
+
+  if (taxa_are_rows(ps)) {
+    x <- t(x)
+  }
+
+  x <- as.data.frame(
+    x,
+    check.names = FALSE
+  )
+
+  return(x)
+}
+```
+
+
+```{r}
+## Load phyloseq object
+ps_f <- readRDS(file = here("data", "phyloseq", "ps_healthy_filtered_082626.rds"))
+
+input_data <- phyloseq_to_maaslin(ps_f)
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# ============================================================
+# NSTI table
+# ============================================================
+
+nsti_df <- nsti %>%
+  select(
+    sequence,
+    metadata_NSTI
+  )
+
+# ============================================================
+# Make sure ASV IDs are available as a column
+# ============================================================
+
+asv_df <- as.data.frame(read.table(here("../data/picrust2/picrust2_input/feature_table.tsv"), header = TRUE, row.names = 1))
+
+asv_df$sequence <- rownames(
+  asv_df
+)
+
+# ============================================================
+# Add NSTI
+# ============================================================
+
+asv_nsti <- asv_df %>%
+  inner_join(
+    nsti_df,
+    by = "sequence"
+  )
+
+# ============================================================
+# Convert to long format
+# ============================================================
+
+asv_nsti_long <- asv_nsti %>%
+  pivot_longer(
+    cols = -c(
+      sequence,
+      metadata_NSTI
+    ),
+    names_to = "sample",
+    values_to = "count"
+  )
+
+# ============================================================
+# NSTI cutoffs
+# ============================================================
+
+cutoffs <- c(
+  0.10,
+  0.15,
+  0.20,
+  0.50,
+  2.00
+)
+
+# ============================================================
+# Fraction of abundance retained in every sample
+# ============================================================
+
+abundance_retention <- lapply(
+  cutoffs,
+  function(cur_cutoff) {
+
+    asv_nsti_long %>%
+      group_by(sample) %>%
+      summarise(
+        total_abundance = sum(
+          count,
+          na.rm = TRUE
+        ),
+        retained_abundance = sum(
+          count[
+            metadata_NSTI <= cur_cutoff
+          ],
+          na.rm = TRUE
+        ),
+        proportion_retained =
+          retained_abundance /
+          total_abundance,
+        .groups = "drop"
+      ) %>%
+      mutate(
+        cutoff = cur_cutoff
+      )
+  }
+) %>%
+  bind_rows()
+```
+
+```{r}
+abundance_retention %>%
+  group_by(cutoff) %>%
+  summarise(
+    mean_retained = mean(
+      proportion_retained,
+      na.rm = TRUE
+    ),
+    median_retained = median(
+      proportion_retained,
+      na.rm = TRUE
+    ),
+    min_retained = min(
+      proportion_retained,
+      na.rm = TRUE
+    ),
+    q05_retained = quantile(
+      proportion_retained,
+      0.05,
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  )
+```
+
+```{r}
+ggplot(
+  abundance_retention,
+  aes(
+    x = factor(cutoff),
+    y = proportion_retained
+  )
+) +
+  geom_boxplot() +
+  labs(
+    x = "Maximum NSTI",
+    y = "Proportion of sample abundance retained"
+  ) +
+  theme_classic()
+
+ggsave(file.path(here("data/manuscript/supp_figs"), "FigS1_NSTIplot.png"), plot = last_plot(), dpi = 600, 
+       width = 12, height = 8, units = "in", limitsize = FALSE)
+```
+
+# Check NSTI for microbes of interest
+```{r}
+picrust_dir <- here("data", "picrust2", "picrust_output_css_all")
+
+library(readr)
+library(dplyr)
+
+nsti_file <- file.path(
+  picrust_dir,
+  "marker_predicted_and_nsti.tsv.gz"
+)
+
+nsti <- read_tsv(
+  nsti_file,
+  show_col_types = FALSE
+)
+
+colnames(nsti)
+head(nsti)
+
+asvs_of_interest <- c(
+  "ASV33",
+  "ASV87",
+  "ASV111",
+  "ASV166"
+)
+
+nsti_selected <- nsti %>%
+  dplyr::filter(
+    sequence %in% asvs_of_interest
+  ) %>%
+  dplyr::select(
+    sequence,
+    metadata_NSTI
+  )
+
+nsti_selected
+```
+

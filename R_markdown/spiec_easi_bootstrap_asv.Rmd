@@ -30,119 +30,33 @@ knitr::opts_chunk$set(echo = TRUE)
 ```
 
 # prep data
-## picrust kegg data
-### load and filter
-```{r}
-# load metadata
-input_meta <- read.csv(here("data/phyloseq/ps_healthy_sample_meta.csv"), row.names = 1)
-
-# load maaslin2 output
-maaslin.all <- read.csv(here("data/maaslin/lm_kegg_100623_2/all_results.tsv"), sep = "")
-
-# significant enzymes for residency comp
-maaslin.residency <- maaslin.all %>%
-  subset(metadata == "Residency_status") %>%
-  subset(qval < 0.25)
-
-# filter by sex
-maaslin.filtered <- maaslin.all %>%
-  subset(metadata == "sex")
-
-# filter by significant sex enzymes
-maaslin.sex <- maaslin.filtered %>%
-  subset(qval < 0.25)
-
-# create list of significant sex enzyme names
-sex_enzyme_names <- maaslin.sex$feature
-
-# load picrust data file
-picrust.kegg <- read.csv(file = here("data/picrust2/picrust2_out_pipeline/KO_metagenome_out/pred_metagenome_unstrat.tsv"),
-                         sep = "\t", row.names = 1)
-
-# filter picrust.kegg by enzymes in maaslin.filtered
-idx <- which(rownames(picrust.kegg) %in% maaslin.filtered$feature)
-
-picrust.kegg.filtered <- picrust.kegg[idx, ]
-
-# transpose picrust.kegg.filtered
-picrust.kegg.f.t <- as.data.frame(t(picrust.kegg.filtered))
-
-# make phyloseq object with picrust data
-ps.kegg <- phyloseq(otu_table(picrust.kegg, taxa_are_rows=TRUE), 
-               sample_data(input_meta))
-
-rm(idx)
-```
-
-
-### filter enzymes
-```{r}
-# filter enzymes to keep ones with greatest variance between sex groups and statistically significant enzymes via maaslin2 linear models
-##################################################################################################################################
-
-# Calculate the variance for each taxon across different levels of 'sex'
-variance_by_enzyme <- apply(otu_table(ps.kegg), 1, function(x) var(x, na.rm = TRUE))
-
-# Convert the result to a data frame for easier manipulation
-variance_df <- data.frame(enzyme = taxa_names(ps.kegg), variance = variance_by_enzyme)
-
-# Sort taxa based on variance in descending order
-variance_df <- variance_df[order(-variance_df$variance), ]
-
-# Specify the number of top taxa you want to keep (e.g., top 10)
-top_enzymes <- 100
-
-# Extract the names of the top taxa
-top_enzyme_names <- variance_df$enzyme[1:top_enzymes]
-
-# Filter the phyloseq object to keep only the top taxa
-ps.kegg.filtered <- prune_taxa(c(top_enzyme_names, sex_enzyme_names) , ps.kegg)
-
-# Now, 'ps.kegg.filtered' contains only the top taxa with the greatest variance for the 'sex' variable
-```
-
-
-### add covariates
-```{r}
-# convert enzymes from ps.kegg.filtered to data frame
-kegg.f <- as.data.frame(t(as(otu_table(ps.kegg.filtered), "matrix")))
-
-# add gestation weeks and infant gender to picrust.kegg.f.t object
-kegg.f <- cbind(kegg.f,input_meta[ , c("Gestation_week", "Infant_gender", "Parity", "Age", "BMI_before_pregnancy", "Residency_status")])
-
-# change infant gender & residency status to 0 & 1
-# infant gender: 0 (male), 1 (female)
-# residency status: 0 (native residents), 1 (immigrant)
-kegg.f <- kegg.f %>%
-  mutate(Infant_gender = case_when(Infant_gender == 1 ~ 0,
-                                   Infant_gender == 2 ~ 1)) %>%
-  mutate(Residency_status = case_when(Residency_status == 1 ~ 0,
-                                   Residency_status == 2 ~ 1)) %>%
-  mutate(Infant_gender = as.factor(Infant_gender)) %>%
-  mutate(Parity = as.integer(Parity)) %>%
-  mutate(Residency_status = as.factor(Residency_status))
-```
-
-
 ## microbiome data
 
 ### load data
 
 ```{r}
+indir <- here("data/MaasLin2/ASV_sex_EGA_ZINB")
+
+outdir <- here("data/spieceasi/microbes")
+
+dir.create(
+  outdir,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
 ## Load phylseq object
-ps.f <- readRDS(file = here("data/phyloseq/ps_healthy_css.rds"))
+ps.f <- readRDS(file=here("data/phyloseq/ps_css.rds"))
 
 input_taxa <- data.frame(tax_table(ps.f))
 
 # load significant microbes
-sex_only <- read.csv(file = here("data/metagenomeSeq/all_samples_sex_sig_taxa.csv"), row.names = 1)
-ega_only <- read.csv(file = here("data/metagenomeSeq/all_samples_ega_sig_taxa.csv"),row.names = 1)
-sex_and_ega <- read.csv(here("data/metagenomeSeq/all_samples_sex_ega_sig_taxa.csv"), row.names = 1)
+sig_asvs <- read.csv(file = file.path(indir, "sex_ega_sig_microbes.csv"), row.names = 1)
 ```
 
 ```{r}
 # create list of significant sex enzyme names
-sex_asv_names <- unique(c(rownames(sex_only), rownames(ega_only), rownames(sex_and_ega)))
+sex_asv_names <- unique(sig_asvs$feature)
 ```
 
 ### filter most abundant asvs
@@ -167,10 +81,10 @@ top_asv_names <- abundance_df$asv[1:100]
 ps.filtered <- prune_taxa(c(top_asv_names, sex_asv_names) , ps.f)
 
 # female: Infant_gender == 2
-ps_female <- subset_samples(ps.filtered, Infant_gender == 2)
+ps_female <- subset_samples(ps.filtered, Infant_gender == 1)
 
 # male: Infant_gender == 1
-ps_male <- subset_samples(ps.filtered, Infant_gender == 1)
+ps_male <- subset_samples(ps.filtered, Infant_gender == 0)
 
 # delete files
 rm(ps.f)
@@ -178,20 +92,19 @@ rm(ps.f)
 
 ```{r}
 # save files
-saveRDS(ps.filtered, file = here("data/spiec-easi/microbes/ps_all_asv.rds"))
-saveRDS(ps_female, file = here("data/spiec-easi/microbes/ps_female_asv.rds"))
-saveRDS(ps_male, file = here("data/spiec-easi/microbes/ps_male_asv.rds"))
+# saveRDS(ps.filtered, file = here("data/spiec-easi/microbes/ps_all_asv.rds"))
+saveRDS(ps_female, file = here("data/spieceasi/microbes/ps_female_asv.rds"))
+saveRDS(ps_male, file = here("data/spieceasi/microbes/ps_male_asv.rds"))
 ```
-
 
 
 ### prep count data
 ```{r}
-# female: Infant_gender == 2
-ps_female <- readRDS(file = here("data/spiec-easi/microbes/ps_female_asv.rds"))
+# female: Infant_gender == 1
+ps_female <- readRDS(file = here("data/spieceasi/microbes/ps_female_asv.rds"))
 
-# male: Infant_gender == 1
-ps_male <- readRDS(file = here("data/spiec-easi/microbes/ps_male_asv.rds"))
+# male: Infant_gender == 0
+ps_male <- readRDS(file = here("data/spieceasi/microbes/ps_male_asv.rds"))
 ```
 
 
@@ -211,7 +124,7 @@ subset_data <- function(input_data) {
 ```{r}
 # bootstrap function below
 run_bootstrapped_spiec_easi <- function(input_phyloseq, n = 100) {
-  ### This function takes a phyloseq object as input and outputs bootstrapped spiec-easi correlation matrices ###
+  ### This function takes a phyloseq object as input and outputs bootstrapped spieceasi correlation matrices ###
   ################################################################################################################################
   cov_matrix_original <- list()
   cov_matrix_shuffled <- list()
@@ -230,7 +143,7 @@ run_bootstrapped_spiec_easi <- function(input_phyloseq, n = 100) {
     # Randomly select 80% of the data
     sampled_data <- subset_data(input_data)
   
-    # Run spiec-easi on the sampled data
+    # Run spieceasi on the sampled data
     sp_og <- spiec.easi(data = sampled_data, method='glasso',sel.criterion='stars', pulsar.select=TRUE, lambda.min.ratio=1e-2,
                            nlambda=20, pulsar.params=pargs1)
     cov_matrix_original[[i]] <- cov2cor(getOptCov(sp_og))
@@ -238,7 +151,7 @@ run_bootstrapped_spiec_easi <- function(input_phyloseq, n = 100) {
     # Shuffle data across columns (keeping row sums constant)
     shuffled_data <- apply(sampled_data, 2, function(x) sample(x))
     
-    # Run spiec-easi on the shuffled data
+    # Run spieceasi on the shuffled data
     cov_matrix_shuffled[[i]] <- cov2cor(getOptCov(spiec.easi(data = shuffled_data, method='glasso',sel.criterion='stars', pulsar.select=TRUE, lambda.min.ratio=1e-2,
                            nlambda=20, pulsar.params=pargs1)))
     
@@ -311,7 +224,7 @@ paired_t_test <- function(list1, list2) {
 }
 ```
 
-## Test run spiec-easi
+## Test run spieceasi
 ```{r}
 # now try without tax_glom
 pargs1 <- list(rep.num=50, seed=10010, ncores=8)
@@ -325,7 +238,7 @@ t2 <- system.time(
 
 
 ```{r}
-# bootstrapping spiec-easi
+# bootstrapping spieceasi
 bootstrapped_se_f <- run_bootstrapped_spiec_easi(ps_female, n = 100)
 bootstrapped_se_m <- run_bootstrapped_spiec_easi(ps_male, n = 100)
 ```
@@ -333,14 +246,14 @@ bootstrapped_se_m <- run_bootstrapped_spiec_easi(ps_male, n = 100)
 
 ```{r}
 # save bootstrapped files
-saveRDS(bootstrapped_se_f, here("data/spiec-easi/microbes/bootstrapped_se_asv_f.rds"))
-saveRDS(bootstrapped_se_m, here("data/spiec-easi/microbes/bootstrapped_se_asv_m.rds"))
+saveRDS(bootstrapped_se_f, here("data/spieceasi/microbes/bootstrapped_se_asv_f.rds"))
+saveRDS(bootstrapped_se_m, here("data/spieceasi/microbes/bootstrapped_se_asv_m.rds"))
 ```
 
 ```{r}
 # read in files
-bootstrapped_se_f <- readRDS(here("data/spiec-easi/microbes/bootstrapped_se_asv_f.rds"))
-bootstrapped_se_m <- readRDS(here("data/spiec-easi/microbes/bootstrapped_se_asv_m.rds"))
+bootstrapped_se_f <- readRDS(here("data/spieceasi/microbes/bootstrapped_se_asv_f.rds"))
+bootstrapped_se_m <- readRDS(here("data/spieceasi/microbes/bootstrapped_se_asv_m.rds"))
 ```
 
 
@@ -354,14 +267,14 @@ result_null_m <- extract_elements(bootstrapped_se_m[[2]])
 result_f <- list(original = result_og_f, null = result_null_f)
 result_m <- list(original = result_og_m, null = result_null_m)
 
-saveRDS(result_f, here("data/spiec-easi/microbes/corr_list_asvs_f.rds"))
-saveRDS(result_m, here("data/spiec-easi/microbes/corr_list_asvs_m.rds"))
+saveRDS(result_f, here("data/spieceasi/microbes/corr_list_asvs_f.rds"))
+saveRDS(result_m, here("data/spieceasi/microbes/corr_list_asvs_m.rds"))
 ```
 
 
 ```{r}
-result_f <- readRDS(here("data/spiec-easi/microbes/corr_list_asvs_f.rds"))
-result_m <- readRDS(here("data/spiec-easi/microbes/corr_list_asvs_m.rds"))
+result_f <- readRDS(here("data/spieceasi/microbes/corr_list_asvs_f.rds"))
+result_m <- readRDS(here("data/spieceasi/microbes/corr_list_asvs_m.rds"))
 
 result_og_f <- result_f[[1]]
 result_null_f <- result_f[[2]]
@@ -382,8 +295,8 @@ p_val_mat_m <- paired_t_test(result_og_m, result_null_m)
 colnames(p_val_mat_m) <- rownames(p_val_mat_m) <- taxa_names(ps_male)
 
 # save un-adjusted p-vals
-saveRDS(p_val_mat_f, here("data/spiec-easi/microbes/p_val_mat_f.rds"))
-saveRDS(p_val_mat_m, here("data/spiec-easi/microbes/p_val_mat_m.rds"))
+saveRDS(p_val_mat_f, here("data/spieceasi/microbes/p_val_mat_f.rds"))
+saveRDS(p_val_mat_m, here("data/spieceasi/microbes/p_val_mat_m.rds"))
 ```
 
 
@@ -393,14 +306,14 @@ p_adjusted_matrix_f <- apply(p_val_mat_f, 1, function(p) p.adjust(p, method = "f
 p_adjusted_matrix_m <- apply(p_val_mat_m, 1, function(p) p.adjust(p, method = "fdr"))
 
 # save adjusted p-vals
-saveRDS(p_adjusted_matrix_f, here("data/spiec-easi/microbes/p_val_mat_adjusted_f.rds"))
-saveRDS(p_adjusted_matrix_m, here("data/spiec-easi/microbes/p_val_mat_adjusted_m.rds"))
+saveRDS(p_adjusted_matrix_f, here("data/spieceasi/microbes/p_val_mat_adjusted_f.rds"))
+saveRDS(p_adjusted_matrix_m, here("data/spieceasi/microbes/p_val_mat_adjusted_m.rds"))
 ```
 
 ```{r}
 # read in adjusted p-vals
-p_val_mat_f <- readRDS(here("data/spiec-easi/microbes/p_val_mat_adjusted_f.rds"))
-p_val_mat_m <- readRDS(here("data/spiec-easi/microbes/p_val_mat_adjusted_m.rds"))
+p_val_mat_f <- readRDS(here("data/spieceasi/microbes/p_val_mat_adjusted_f.rds"))
+p_val_mat_m <- readRDS(here("data/spieceasi/microbes/p_val_mat_adjusted_m.rds"))
 ```
 
 ## Identify q-val cutoff using pracma package
@@ -485,284 +398,2849 @@ ggplot(data.frame(pval = pval_vector), aes(x = pval)) +
   theme_minimal()
 ```
 
-
-
-
-
-
-
-
-
-## Identify q-val cutoff using % edges retained
 ```{r}
-# female 
-###################################################################
+edge_mat_from_correlations <- function(
+  p_val_mat,
+  corr_list,
+  pval_cutoff
+) {
 
-# Extract upper and lower triangle p-values
-upper_tri <- p_val_mat_f[upper.tri(p_val_mat_f)]
-lower_tri <- p_val_mat_f[lower.tri(p_val_mat_f)]
+  # ----------------------------------------------------------
+  # Checks
+  # ----------------------------------------------------------
 
-# Combine both sets of p-values into a single vector
-pval_vector <- c(upper_tri, lower_tri)
+  if (nrow(p_val_mat) != ncol(p_val_mat)) {
+    stop("p_val_mat must be a square matrix.")
+  }
 
-# Remove NA values
-pval_vector <- na.omit(pval_vector)
+  n <- nrow(p_val_mat)
 
-# Determine the 2% quantile (i.e., the p-value threshold to keep only the smallest 2% of p-values)
-pval_cutoff_f <- quantile(pval_vector, 0.03)
+  if (length(corr_list) != n^2) {
+    stop(
+      "corr_list length does not match p-value matrix dimensions."
+    )
+  }
 
-# Print the chosen cutoff
-print(pval_cutoff_f)
 
-# Create a new adjacency matrix that retains only significant edges
-significant_edges <- p_val_mat_f < pval_cutoff_f
+  # ----------------------------------------------------------
+  # Calculate mean bootstrap edge weight
+  # for every matrix position
+  # ----------------------------------------------------------
 
-# Set diagonal to FALSE (since self-loops are not considered)
-diag(significant_edges) <- FALSE
+  mean_correlations <- vapply(
+    corr_list,
+    function(x) {
+      mean(
+        x,
+        na.rm = TRUE
+      )
+    },
+    numeric(1)
+  )
 
-# Count how many edges are retained
-sum(significant_edges, na.rm = TRUE)/2
+
+  # ----------------------------------------------------------
+  # Reconstruct correlation matrix
+  #
+  # IMPORTANT:
+  # extract_elements() stored positions row-by-row,
+  # so use byrow = TRUE
+  # ----------------------------------------------------------
+
+  corr_mat <- matrix(
+    mean_correlations,
+    nrow = n,
+    ncol = n,
+    byrow = TRUE
+  )
+
+
+  # ----------------------------------------------------------
+  # Add taxa names
+  # ----------------------------------------------------------
+
+  dimnames(corr_mat) <- dimnames(
+    p_val_mat
+  )
+
+
+  # ----------------------------------------------------------
+  # Keep only significant edges
+  # ----------------------------------------------------------
+
+  keep <- (
+    !is.na(p_val_mat) &
+    p_val_mat < pval_cutoff
+  )
+
+  # Remove self-edges
+  diag(keep) <- FALSE
+
+  corr_mat[
+    !keep
+  ] <- 0
+
+
+  # ----------------------------------------------------------
+  # Return filtered edge matrix
+  # ----------------------------------------------------------
+
+  return(
+    corr_mat
+  )
+}
+```
+
+
+```{r}
+pval_cutoff <- 0.05
+
+test_f <- edge_mat_from_correlations(
+  p_val_mat = p_val_mat_f,
+  corr_list = result_og_f,
+  pval_cutoff = pval_cutoff
+)
+
+test_m <- edge_mat_from_correlations(
+  p_val_mat = p_val_mat_m,
+  corr_list = result_og_m,
+  pval_cutoff = pval_cutoff
+)
 ```
 
 ```{r}
-# male 
-###################################################################
+# ============================================================
+# Extract significant nonzero edge weights
+# Upper triangle avoids duplicate A-B / B-A edges
+# ============================================================
 
-# Extract upper and lower triangle p-values
-upper_tri <- p_val_mat_m[upper.tri(p_val_mat_m)]
-lower_tri <- p_val_mat_m[lower.tri(p_val_mat_m)]
+edge_weights_sig_f <- abs(
+  test_f[
+    upper.tri(test_f) &
+      test_f != 0
+  ]
+)
 
-# Combine both sets of p-values into a single vector
-pval_vector <- c(upper_tri, lower_tri)
+edge_weights_sig_m <- abs(
+  test_m[
+    upper.tri(test_m) &
+      test_m != 0
+  ]
+)
 
-# Remove NA values
-pval_vector <- na.omit(pval_vector)
+length(edge_weights_sig_f)
+# 1662
 
-# Determine the 2% quantile (i.e., the p-value threshold to keep only the smallest 2% of p-values)
-pval_cutoff_m <- quantile(pval_vector, 0.05)
+length(edge_weights_sig_m)
+# 671
 
-# Print the chosen cutoff
-print(pval_cutoff_m)
 
-# Create a new adjacency matrix that retains only significant edges
-significant_edges <- p_val_mat_m < pval_cutoff_m
+# ============================================================
+# Summaries
+# ============================================================
 
-# Set diagonal to FALSE (since self-loops are not considered)
-diag(significant_edges) <- FALSE
+summary(
+  edge_weights_sig_f
+)
 
-# Count how many edges are retained
-sum(significant_edges, na.rm = TRUE)/2
+summary(
+  edge_weights_sig_m
+)
+
+quantile(
+  edge_weights_sig_f,
+  probs = c(
+    0.50,
+    0.60,
+    0.70,
+    0.75,
+    0.80,
+    0.85,
+    0.90,
+    0.95
+  )
+)
+
+quantile(
+  edge_weights_sig_m,
+  probs = c(
+    0.50,
+    0.60,
+    0.70,
+    0.75,
+    0.80,
+    0.85,
+    0.90,
+    0.95
+  )
+)
 ```
 
 ```{r}
-(pval_cutoff_f + pval_cutoff_m)/2
+library(dplyr)
+library(ggplot2)
+
+edge_weight_df <- bind_rows(
+  data.frame(
+    edge_weight = edge_weights_sig_f,
+    group = "Female"
+  ),
+  data.frame(
+    edge_weight = edge_weights_sig_m,
+    group = "Male"
+  )
+)
+
+ggplot(
+  edge_weight_df,
+  aes(
+    x = edge_weight,
+    fill = group
+  )
+) +
+  geom_density(
+    alpha = 0.4
+  ) +
+  scale_x_log10() +
+  labs(
+    title = "Distribution of Significant SPIEC-EASI Edge Weights",
+    x = "Absolute Edge Weight",
+    y = "Density",
+    fill = NULL
+  ) +
+  theme_minimal()
+```
+
+```{r}
+all_sig_weights <- c(
+  edge_weights_sig_f,
+  edge_weights_sig_m
+)
+
+quantile(
+  all_sig_weights,
+  probs = c(
+    0.50,
+    0.60,
+    0.70,
+    0.75,
+    0.80,
+    0.85,
+    0.90,
+    0.95
+  )
+)
 ```
 
 
-
-## Randomly selected q-val cutoff
-
 ```{r}
-pval_cutoff <- 1E-20
+candidate_cutoffs <- quantile(
+  all_sig_weights,
+  probs = c(
+    0.50,
+    0.75,
+    0.90
+  )
+)
 
-#pval_cutoff <- 0.0362186975090115
-
-edge_table_f <- ifelse(p_val_mat_f < pval_cutoff, 1, 0)
-
-edge_table_f <- ifelse(is.na(edge_table_f), 0, edge_table_f)
-
-edge_table_m <- ifelse(p_val_mat_m < pval_cutoff, 1, 0)
-
-edge_table_m <- ifelse(is.na(edge_table_m), 0, edge_table_m)
+ggplot(
+  edge_weight_df,
+  aes(
+    x = edge_weight,
+    fill = group
+  )
+) +
+  geom_density(
+    alpha = 0.4
+  ) +
+  geom_vline(
+    xintercept = candidate_cutoffs,
+    linetype = "dashed"
+  ) +
+  scale_x_log10() +
+  labs(
+    title = "Significant Edge-Weight Distribution",
+    x = "Absolute Edge Weight",
+    y = "Density",
+    fill = NULL
+  ) +
+  theme_minimal()
 ```
 
-# Function to identify significant edges from p-value list then use those indices to calculate mean from bootstrapped correlation matrices to create a weighted edge matrix
 ```{r}
-edge_mat_from_correlations <- function(p_val_list, corr_list, pval_cutoff) {
-  result_list <- list()
-  edges_to_keep <- which(p_val_list < pval_cutoff)
-  
-  # Use sapply to apply the function to the elements of the list indexed by the vector
-  result <- sapply(edges_to_keep, function(index) mean(corr_list[[index]]))
-  names(result) <- edges_to_keep
+edge_weight_cutoff <- 0.005
 
-  for (i in 1:length(corr_list)) {
-    if (i %in% names(result)) {
-      result_list[[i]] <- mean(corr_list[[i]])
-    } else {
-      result_list[[i]] <- 0
+test_f_filtered <- test_f
+test_m_filtered <- test_m
+
+test_f_filtered[
+  abs(test_f_filtered) < edge_weight_cutoff
+] <- 0
+
+test_m_filtered[
+  abs(test_m_filtered) < edge_weight_cutoff
+] <- 0
+
+sum(
+  test_f_filtered[
+    upper.tri(test_f_filtered)
+  ] != 0
+)
+
+sum(
+  test_m_filtered[
+    upper.tri(test_m_filtered)
+  ] != 0
+)
+```
+
+
+## prep for cytoscape
+### edge table
+```{r}
+library(dplyr)
+library(tibble)
+
+# ============================================================
+# Convert filtered adjacency matrix to Cytoscape edge list
+# ============================================================
+
+matrix_to_edge_list <- function(mat) {
+
+  mat <- as.matrix(mat)
+
+  # Keep upper triangle only so each edge appears once
+  idx <- which(
+    upper.tri(mat) &
+      mat != 0,
+    arr.ind = TRUE
+  )
+
+  edge_list <- data.frame(
+    source = rownames(mat)[idx[, 1]],
+    target = colnames(mat)[idx[, 2]],
+    weight = mat[idx],
+    stringsAsFactors = FALSE
+  ) %>%
+    dplyr::mutate(
+      abs_weight = abs(weight),
+      interaction = if_else(
+        weight > 0,
+        "positive",
+        "negative"
+      )
+    )
+
+  return(edge_list)
+}
+
+
+# ============================================================
+# Female network
+# ============================================================
+
+edges_cytoscape_f <- matrix_to_edge_list(
+  test_f_filtered
+)
+
+
+# ============================================================
+# Male network
+# ============================================================
+
+edges_cytoscape_m <- matrix_to_edge_list(
+  test_m_filtered
+)
+
+
+# ============================================================
+# Check
+# ============================================================
+
+dim(edges_cytoscape_f)
+dim(edges_cytoscape_m)
+
+head(edges_cytoscape_f)
+head(edges_cytoscape_m)
+```
+```{r}
+# save tables for cytoscape
+write.csv(
+  edges_cytoscape_f,
+  here(
+    "data/spieceasi/microbes/cytoscape_edges_female.csv"
+  ),
+  row.names = FALSE
+)
+
+write.csv(
+  edges_cytoscape_m,
+  here(
+    "data/spieceasi/microbes/cytoscape_edges_male.csv"
+  ),
+  row.names = FALSE
+)
+
+# save rds files for future use
+saveRDS(
+  test_f_filtered,
+  here(
+    "data/spieceasi/microbes/test_f_filtered.rds"
+  )
+)
+
+saveRDS(
+  test_m_filtered,
+  here(
+    "data/spieceasi/microbes/test_m_filtered.rds"
+  )
+)
+```
+
+### node table
+```{r}
+library(phyloseq)
+library(dplyr)
+library(tibble)
+
+# ============================================================
+# Extract taxonomy from phyloseq
+# ============================================================
+## Load phylseq object
+ps.f <- readRDS(file=here("data/phyloseq/ps_css.rds"))
+
+nrow(ps.f@otu_table)
+ncol(ps.f@otu_table)
+
+taxonomy_cytoscape <- tax_table(ps.f) %>%
+  as("matrix") %>%
+  as.data.frame(
+    stringsAsFactors = FALSE
+  ) %>%
+  rownames_to_column(
+    var = "ASV"
+  )
+
+head(taxonomy_cytoscape)
+
+colnames(taxonomy_cytoscape)
+
+# ============================================================
+# Nodes present in final female network
+# ============================================================
+
+nodes_f <- unique(
+  c(
+    edges_cytoscape_f$source,
+    edges_cytoscape_f$target
+  )
+)
+
+
+# ============================================================
+# Nodes present in final male network
+# ============================================================
+
+nodes_m <- unique(
+  c(
+    edges_cytoscape_m$source,
+    edges_cytoscape_m$target
+  )
+)
+
+```
+
+```{r}
+write.csv(
+  taxonomy_cytoscape_filtered,
+  here(
+    "data/spieceasi/microbes/cytoscape_node_taxonomy.csv"
+  ),
+  row.names = FALSE
+)
+```
+
+
+```{r}
+# ============================================================
+# 1. Load files
+# ============================================================
+sex_microbes <- read.csv(file =  here("data/MaasLin2/asvs_zinb/sex_ega_sig_microbes.csv"), row.names = 1)
+
+asv_kegg <-
+  read.table(
+      file=here('data/picrust2/picrust_output_css_all/KO_predicted.tsv.gz'),
+      sep='\t',
+      header=TRUE,
+      row.names = 1,
+      stringsAsFactors = FALSE)
+
+
+# ============================================================
+# 1. Identify differentially abundant ASVs
+# ============================================================
+
+da_asvs <- unique(sex_microbes$feature)
+
+
+# ============================================================
+# 2. Identify GUSB-expressing ASVs
+#    K01195 = beta-glucuronidase
+# ============================================================
+
+gusb_asvs <- rownames(asv_kegg)[
+  !is.na(asv_kegg[, "K01195"]) &
+    asv_kegg[, "K01195"] > 0
+]
+
+
+# ============================================================
+# 3. Add node-information labels
+# ============================================================
+
+nodes_f <- data.frame(
+  ASV = nodes_f
+)
+
+nodes_f <- nodes_f %>%
+  dplyr::mutate(
+    node_info = case_when(
+      ASV %in% da_asvs & ASV %in% gusb_asvs ~ "DA_GUSB",
+      ASV %in% da_asvs ~ "DA",
+      ASV %in% gusb_asvs ~ "GUSB",
+      TRUE ~ "A"
+    )
+  )
+
+nodes_m <- data.frame(
+  ASV = nodes_m
+)
+
+nodes_m <- nodes_m %>%
+  dplyr::mutate(
+    node_info = case_when(
+      ASV %in% da_asvs & ASV %in% gusb_asvs ~ "DA_GUSB",
+      ASV %in% da_asvs ~ "DA",
+      ASV %in% gusb_asvs ~ "GUSB",
+      TRUE ~ "A"
+    )
+  )
+
+
+# Optional: set order for plotting
+nodes_f$node_info <- factor(
+  nodes_f$node_info,
+  levels = c("A", "GUSB", "DA", "DA_GUSB")
+)
+
+nodes_m$node_info <- factor(
+  nodes_m$node_info,
+  levels = c("A", "GUSB", "DA", "DA_GUSB")
+)
+```
+
+
+```{r}
+# ============================================================
+# Combine nodes from female and male networks
+# ============================================================
+
+nodes_f_clean <- nodes_f %>%
+  dplyr::select(
+    ASV,
+    node_info
+  ) %>%
+  distinct() %>%
+  dplyr::rename(
+    female_node_info = node_info
+  )
+
+nodes_m_clean <- nodes_m %>%
+  dplyr::select(
+    ASV,
+    node_info
+  ) %>%
+  distinct() %>%
+  dplyr::rename(
+    male_node_info = node_info
+  )
+
+
+# ============================================================
+# Union of nodes from both networks
+# ============================================================
+
+nodes_all <- dplyr::full_join(
+  nodes_f_clean,
+  nodes_m_clean,
+  by = "ASV"
+) %>%
+  dplyr::mutate(
+    female_network = !is.na(female_node_info),
+    male_network = !is.na(male_node_info)
+  )
+
+
+# ============================================================
+# Add combined node label
+#
+# Since DA/GUSB status is based on the same ASV-level lists,
+# calculate it directly from ASV.
+# ============================================================
+
+nodes_all <- nodes_all %>%
+  mutate(
+    node_info = case_when(
+      ASV %in% da_asvs & ASV %in% gusb_asvs ~ "DA_GUSB",
+      ASV %in% da_asvs ~ "DA",
+      ASV %in% gusb_asvs ~ "GUSB",
+      TRUE ~ "A"
+    )
+  )
+
+
+# ============================================================
+# Add taxonomy information
+# ============================================================
+
+taxonomy_cytoscape_filtered <- nodes_all %>%
+  left_join(
+    taxonomy_cytoscape,
+    by = "ASV"
+  )
+
+
+# ============================================================
+# QC
+# ============================================================
+
+# Nodes without taxonomy information
+nodes_without_taxonomy <- setdiff(
+  nodes_all$ASV,
+  taxonomy_cytoscape$ASV
+)
+
+print(nodes_without_taxonomy)
+
+# Number of unique nodes
+nrow(nodes_all)
+
+# Node label counts
+table(
+  nodes_all$node_info,
+  useNA = "ifany"
+)
+
+# Network membership
+table(
+  nodes_all$female_network,
+  nodes_all$male_network
+)
+
+
+# ============================================================
+# Save combined node table
+# ============================================================
+
+write.csv(
+  taxonomy_cytoscape_filtered,
+  here(
+    "data/spieceasi/microbes/cytoscape_node_taxonomy.csv"
+  ),
+  row.names = FALSE
+)
+```
+
+# graph properties
+```{r}
+# ============================================================
+# Compare two signed, weighted, undirected GraphML networks
+#
+# Metrics:
+#
+# Global:
+#   - Average shortest path length
+#   - Global clustering coefficient
+#   - Percent negative edges
+#
+# Node:
+#   - Degree
+#   - Local clustering coefficient
+#   - Closeness centrality
+#   - Eccentricity
+#   - Stress centrality
+#   - Betweenness centrality
+#
+# Edge:
+#   - Edge betweenness
+#   - Edge sign
+#   - Sign changes between male and female networks
+#
+# IMPORTANT:
+# Signed weights are NOT used as distances.
+# All path-based network statistics use unweighted topology.
+# Edge weights are retained only for sign comparisons.
+# ============================================================
+
+library(igraph)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(readr)
+library(here)
+
+
+# ============================================================
+# INPUT
+# ============================================================
+
+graph1_file <- here(
+  "data/cytoscape/male_network.graphml"
+)
+
+graph2_file <- here(
+  "data/cytoscape/female_network.graphml"
+)
+
+outdir <- here(
+  "data/cytoscape/network_comparison"
+)
+
+dir.create(
+  outdir,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+message("Output directory: ", outdir)
+
+
+# ============================================================
+# LOAD GRAPHS
+# ============================================================
+
+g1 <- igraph::read_graph(
+  graph1_file,
+  format = "graphml"
+)
+
+g2 <- igraph::read_graph(
+  graph2_file,
+  format = "graphml"
+)
+
+
+# ============================================================
+# GRAPH QC FUNCTION
+# ============================================================
+
+check_graph <- function(
+  g,
+  graph_name
+) {
+
+  message(
+    "Checking ",
+    graph_name,
+    "..."
+  )
+
+  # ----------------------------------------------------------
+  # Must be undirected
+  # ----------------------------------------------------------
+
+  if (igraph::is_directed(g)) {
+    stop(
+      graph_name,
+      " is directed. Expected an undirected graph."
+    )
+  }
+
+  # ----------------------------------------------------------
+  # Weight attribute must exist
+  # ----------------------------------------------------------
+
+  if (!"weight" %in% igraph::edge_attr_names(g)) {
+    stop(
+      graph_name,
+      " does not contain an edge attribute named 'weight'."
+    )
+  }
+
+  # ----------------------------------------------------------
+  # Vertex names are required for graph comparison
+  # ----------------------------------------------------------
+
+  if (!"name" %in% igraph::vertex_attr_names(g)) {
+    stop(
+      graph_name,
+      " does not contain vertex names."
+    )
+  }
+
+  node_names <- as.character(
+    igraph::V(g)$name
+  )
+
+  if (anyNA(node_names)) {
+    stop(
+      graph_name,
+      " contains missing vertex names."
+    )
+  }
+
+  if (any(node_names == "")) {
+    stop(
+      graph_name,
+      " contains empty vertex names."
+    )
+  }
+
+  if (anyDuplicated(node_names) > 0) {
+    stop(
+      graph_name,
+      " contains duplicated vertex names."
+    )
+  }
+
+  # ----------------------------------------------------------
+  # Convert weights to numeric
+  # ----------------------------------------------------------
+
+  weights_numeric <- suppressWarnings(
+    as.numeric(
+      igraph::E(g)$weight
+    )
+  )
+
+  if (
+    length(weights_numeric) !=
+      igraph::ecount(g)
+  ) {
+    stop(
+      graph_name,
+      ": could not convert edge weights correctly."
+    )
+  }
+
+  if (anyNA(weights_numeric)) {
+    stop(
+      graph_name,
+      " contains missing or non-numeric edge weights."
+    )
+  }
+
+  igraph::E(g)$weight <- weights_numeric
+
+  # ----------------------------------------------------------
+  # Warn about loops or multiple edges
+  # ----------------------------------------------------------
+
+  if (any(igraph::which_loop(g))) {
+    warning(
+      graph_name,
+      " contains self-loops."
+    )
+  }
+
+  if (!igraph::is_simple(g)) {
+    warning(
+      graph_name,
+      " is not a simple graph. ",
+      "Parallel edges or self-loops may affect metrics."
+    )
+  }
+
+  message(
+    graph_name,
+    ": ",
+    igraph::vcount(g),
+    " nodes, ",
+    igraph::ecount(g),
+    " edges"
+  )
+
+  message(
+    graph_name,
+    " weight range: ",
+    paste(
+      range(
+        igraph::E(g)$weight
+      ),
+      collapse = " to "
+    )
+  )
+
+  return(g)
+}
+
+
+# ============================================================
+# RUN QC
+# ============================================================
+
+g1 <- check_graph(
+  g1,
+  "Male graph"
+)
+
+g2 <- check_graph(
+  g2,
+  "Female graph"
+)
+
+
+# ============================================================
+# STRESS CENTRALITY
+#
+# Stress centrality = total number of shortest paths between
+# all OTHER node pairs that pass through a node.
+#
+# We calculate this directly with igraph and avoid sna.
+#
+# Because the graph is undirected, each unordered pair i-j
+# is evaluated exactly once.
+# ============================================================
+
+calculate_stress_centrality <- function(g) {
+
+  n_nodes <- igraph::vcount(g)
+
+  stress <- numeric(
+    n_nodes
+  )
+
+  names(stress) <- igraph::V(g)$name
+
+  # ----------------------------------------------------------
+  # Cannot have an internal node on a shortest path if the
+  # network contains fewer than three nodes.
+  # ----------------------------------------------------------
+
+  if (n_nodes < 3) {
+    return(stress)
+  }
+
+  # ----------------------------------------------------------
+  # Loop over unordered source-target pairs
+  # ----------------------------------------------------------
+
+  for (i in seq_len(n_nodes - 1)) {
+
+    for (j in seq.int(
+      i + 1,
+      n_nodes
+    )) {
+
+      shortest_paths_ij <- igraph::all_shortest_paths(
+        g,
+        from = i,
+        to = j,
+        mode = "all",
+        weights = NA
+      )$res
+
+      # ------------------------------------------------------
+      # Disconnected pair
+      # ------------------------------------------------------
+
+      if (length(shortest_paths_ij) == 0) {
+        next
+      }
+
+      # ------------------------------------------------------
+      # Count every geodesic separately
+      # ------------------------------------------------------
+
+      for (path in shortest_paths_ij) {
+
+        path_nodes <- as.integer(
+          path
+        )
+
+        # Direct edge:
+        # no internal nodes
+        if (length(path_nodes) <= 2) {
+          next
+        }
+
+        internal_nodes <- path_nodes[
+          2:(length(path_nodes) - 1)
+        ]
+
+        stress[
+          internal_nodes
+        ] <- stress[
+          internal_nodes
+        ] + 1
+      }
     }
   }
-  results <- matrix(result_list, nrow = sqrt(length(result_list)))
-  return(results)
+
+  return(stress)
 }
 
-test_f <- edge_mat_from_correlations(p_val_mat_f, result_og_f, pval_cutoff)
 
-colnames(test_f) <- rownames(test_f) <- colnames(p_val_mat_f)
+# ============================================================
+# CALCULATE NETWORK PROPERTIES
+# ============================================================
 
-test_m <- edge_mat_from_correlations(p_val_mat_m, result_og_m, pval_cutoff)
-colnames(test_m) <- rownames(test_m) <- colnames(p_val_mat_m)
+calculate_network_properties <- function(
+  g,
+  network_name
+) {
 
-saveRDS(test_f, here("data/spiec-easi/microbes/edge_mat_f_p20.rds"))
-saveRDS(test_m, here("data/spiec-easi/microbes/edge_mat_m_p20.rds"))
+  message(
+    "\n============================================"
+  )
+
+  message(
+    "Calculating network properties: ",
+    network_name
+  )
+
+  message(
+    "============================================"
+  )
+
+  # ==========================================================
+  # COMPONENTS
+  # ==========================================================
+
+  comp <- igraph::components(
+    g
+  )
+
+  largest_component_id <- which.max(
+    comp$csize
+  )
+
+  largest_component_nodes <- which(
+    comp$membership ==
+      largest_component_id
+  )
+
+  g_lcc <- igraph::induced_subgraph(
+    g,
+    vids = largest_component_nodes
+  )
+
+
+  # ==========================================================
+  # GLOBAL:
+  # AVERAGE SHORTEST PATH LENGTH
+  #
+  # Calculated on largest connected component.
+  # Signed weights are NOT used as distances.
+  # ==========================================================
+
+  if (igraph::vcount(g_lcc) > 1) {
+
+    avg_shortest_path_length <- igraph::mean_distance(
+      g_lcc,
+      directed = FALSE,
+      weights = NA,
+      unconnected = FALSE
+    )
+
+  } else {
+
+    avg_shortest_path_length <- NA_real_
+  }
+
+
+  # ==========================================================
+  # GLOBAL:
+  # CLUSTERING COEFFICIENT
+  # ==========================================================
+
+  clustering_coefficient <- igraph::transitivity(
+    g,
+    type = "global"
+  )
+
+  if (
+    length(clustering_coefficient) == 0 ||
+      is.nan(clustering_coefficient)
+  ) {
+
+    clustering_coefficient <- NA_real_
+  }
+
+
+  # ==========================================================
+  # GLOBAL:
+  # PERCENT NEGATIVE EDGES
+  # ==========================================================
+
+  n_edges <- igraph::ecount(
+    g
+  )
+
+  n_negative_edges <- sum(
+    igraph::E(g)$weight < 0
+  )
+
+  n_positive_edges <- sum(
+    igraph::E(g)$weight > 0
+  )
+
+  n_zero_edges <- sum(
+    igraph::E(g)$weight == 0
+  )
+
+  percent_negative_edges <- if (
+    n_edges > 0
+  ) {
+
+    100 *
+      n_negative_edges /
+      n_edges
+
+  } else {
+
+    NA_real_
+  }
+
+
+  # ==========================================================
+  # GLOBAL TABLE
+  # ==========================================================
+
+  global_stats <- tibble(
+    network = network_name,
+
+    n_nodes = igraph::vcount(g),
+
+    n_edges = n_edges,
+
+    n_positive_edges =
+      n_positive_edges,
+
+    n_negative_edges =
+      n_negative_edges,
+
+    n_zero_edges =
+      n_zero_edges,
+
+    percent_negative_edges =
+      percent_negative_edges,
+
+    average_shortest_path_length =
+      avg_shortest_path_length,
+
+    clustering_coefficient =
+      clustering_coefficient
+  )
+
+
+  # ==========================================================
+  # NODE:
+  # DEGREE
+  # ==========================================================
+
+  message(
+    "Calculating degree..."
+  )
+
+  node_degree <- igraph::degree(
+    g,
+    mode = "all",
+    loops = FALSE
+  )
+
+
+  # ==========================================================
+  # NODE:
+  # LOCAL CLUSTERING COEFFICIENT
+  # ==========================================================
+
+  message(
+    "Calculating local clustering coefficient..."
+  )
+
+  node_clustering <- igraph::transitivity(
+    g,
+    type = "local",
+    isolates = "zero"
+  )
+
+
+  # ==========================================================
+  # NODE:
+  # CLOSENESS CENTRALITY
+  # ==========================================================
+
+  message(
+    "Calculating closeness..."
+  )
+
+  node_closeness <- igraph::closeness(
+    g,
+    mode = "all",
+    weights = NA,
+    normalized = TRUE
+  )
+
+
+  # ==========================================================
+  # NODE:
+  # ECCENTRICITY
+  # ==========================================================
+
+  message(
+    "Calculating eccentricity..."
+  )
+
+  node_eccentricity <- igraph::eccentricity(
+    g,
+    mode = "all",
+    weights = NA
+  )
+
+
+  # ==========================================================
+  # NODE:
+  # BETWEENNESS CENTRALITY
+  # ==========================================================
+
+  message(
+    "Calculating betweenness..."
+  )
+
+  node_betweenness <- igraph::betweenness(
+    g,
+    directed = FALSE,
+    weights = NA,
+    normalized = TRUE
+  )
+
+
+  # ==========================================================
+  # NODE:
+  # STRESS CENTRALITY
+  # ==========================================================
+
+  message(
+    "Calculating stress centrality..."
+  )
+
+  node_stress <- calculate_stress_centrality(
+    g
+  )
+
+
+  # ==========================================================
+  # NODE TABLE
+  # ==========================================================
+
+  node_stats <- tibble(
+    node = as.character(
+      igraph::V(g)$name
+    ),
+
+    network = network_name,
+
+    degree = as.numeric(
+      node_degree
+    ),
+
+    clustering_coefficient =
+      as.numeric(
+        node_clustering
+      ),
+
+    closeness = as.numeric(
+      node_closeness
+    ),
+
+    eccentricity = as.numeric(
+      node_eccentricity
+    ),
+
+    stress = as.numeric(
+      node_stress
+    ),
+
+    betweenness = as.numeric(
+      node_betweenness
+    )
+  )
+
+
+  # ==========================================================
+  # EDGE:
+  # ENDPOINTS
+  # ==========================================================
+
+  edge_ends <- igraph::ends(
+    g,
+    igraph::E(g),
+    names = TRUE
+  )
+
+
+  # ==========================================================
+  # EDGE:
+  # BETWEENNESS
+  # ==========================================================
+
+  message(
+    "Calculating edge betweenness..."
+  )
+
+  edge_bet <- igraph::edge_betweenness(
+    g,
+    directed = FALSE,
+    weights = NA
+  )
+
+
+  # ==========================================================
+  # EDGE TABLE
+  # ==========================================================
+
+  edge_stats <- tibble(
+    from = as.character(
+      edge_ends[, 1]
+    ),
+
+    to = as.character(
+      edge_ends[, 2]
+    ),
+
+    network = network_name,
+
+    weight = as.numeric(
+      igraph::E(g)$weight
+    ),
+
+    edge_betweenness = as.numeric(
+      edge_bet
+    )
+  ) %>%
+    dplyr::mutate(
+      sign = case_when(
+        weight > 0 ~ "positive",
+        weight < 0 ~ "negative",
+        weight == 0 ~ "zero",
+        TRUE ~ NA_character_
+      ),
+
+      # ------------------------------------------------------
+      # Canonical ordering for an undirected edge.
+      #
+      # A--B and B--A therefore receive the same edge ID.
+      # ------------------------------------------------------
+
+      node1 = if_else(
+        from <= to,
+        from,
+        to
+      ),
+
+      node2 = if_else(
+        from <= to,
+        to,
+        from
+      ),
+
+      edge_id = paste(
+        node1,
+        node2,
+        sep = "__"
+      )
+    ) %>%
+    dplyr::select(
+      edge_id,
+      node1,
+      node2,
+      network,
+      weight,
+      sign,
+      edge_betweenness
+    )
+
+
+  # ==========================================================
+  # RETURN
+  # ==========================================================
+
+  return(
+    list(
+      global = global_stats,
+      nodes = node_stats,
+      edges = edge_stats
+    )
+  )
+}
+
+
+# ============================================================
+# CALCULATE MALE NETWORK
+# ============================================================
+
+results_g1 <- calculate_network_properties(
+  g = g1,
+  network_name = "male"
+)
+
+
+# ============================================================
+# CALCULATE FEMALE NETWORK
+# ============================================================
+
+results_g2 <- calculate_network_properties(
+  g = g2,
+  network_name = "female"
+)
+
+
+# ============================================================
+# GLOBAL NETWORK COMPARISON
+# ============================================================
+
+global_comparison <- bind_rows(
+  results_g1$global,
+  results_g2$global
+)
+
+print(
+  global_comparison
+)
+
+readr::write_csv(
+  global_comparison,
+  file.path(
+    outdir,
+    "global_network_properties.csv"
+  )
+)
+
+
+# ============================================================
+# GLOBAL NETWORK DIFFERENCE TABLE
+# ============================================================
+
+global_difference <- global_comparison %>%
+  dplyr::select(
+    network,
+    percent_negative_edges,
+    average_shortest_path_length,
+    clustering_coefficient
+  ) %>%
+  pivot_longer(
+    cols = -network,
+    names_to = "metric",
+    values_to = "value"
+  ) %>%
+  pivot_wider(
+    names_from = network,
+    values_from = value
+  ) %>%
+  dplyr::mutate(
+    female_minus_male =
+      female - male
+  )
+
+print(
+  global_difference
+)
+
+readr::write_csv(
+  global_difference,
+  file.path(
+    outdir,
+    "global_network_property_differences.csv"
+  )
+)
+
+
+# ============================================================
+# NODE COMPARISON
+# ============================================================
+
+node_comparison <- results_g1$nodes %>%
+  dplyr::select(
+    -network
+  ) %>%
+  dplyr::rename(
+    degree_male =
+      degree,
+
+    clustering_coefficient_male =
+      clustering_coefficient,
+
+    closeness_male =
+      closeness,
+
+    eccentricity_male =
+      eccentricity,
+
+    stress_male =
+      stress,
+
+    betweenness_male =
+      betweenness
+  ) %>%
+  dplyr::full_join(
+    results_g2$nodes %>%
+      dplyr::select(
+        -network
+      ) %>%
+      dplyr::rename(
+        degree_female =
+          degree,
+
+        clustering_coefficient_female =
+          clustering_coefficient,
+
+        closeness_female =
+          closeness,
+
+        eccentricity_female =
+          eccentricity,
+
+        stress_female =
+          stress,
+
+        betweenness_female =
+          betweenness
+      ),
+    by = "node"
+  ) %>%
+  dplyr::mutate(
+    node_status = case_when(
+      !is.na(degree_male) &
+        !is.na(degree_female) ~
+        "shared",
+
+      !is.na(degree_male) &
+        is.na(degree_female) ~
+        "male_only",
+
+      is.na(degree_male) &
+        !is.na(degree_female) ~
+        "female_only",
+
+      TRUE ~ NA_character_
+    ),
+
+    degree_change =
+      degree_female -
+      degree_male,
+
+    clustering_coefficient_change =
+      clustering_coefficient_female -
+      clustering_coefficient_male,
+
+    closeness_change =
+      closeness_female -
+      closeness_male,
+
+    eccentricity_change =
+      eccentricity_female -
+      eccentricity_male,
+
+    stress_change =
+      stress_female -
+      stress_male,
+
+    betweenness_change =
+      betweenness_female -
+      betweenness_male
+  )
+
+
+# ============================================================
+# SAVE NODE COMPARISON
+# ============================================================
+
+readr::write_csv(
+  node_comparison,
+  file.path(
+    outdir,
+    "node_property_comparison.csv"
+  )
+)
+
+
+# ============================================================
+# EDGE COMPARISON
+# ============================================================
+
+edge_comparison <- results_g1$edges %>%
+  dplyr::select(
+    edge_id,
+    node1,
+    node2,
+
+    weight_male =
+      weight,
+
+    sign_male =
+      sign,
+
+    edge_betweenness_male =
+      edge_betweenness
+  ) %>%
+  dplyr::full_join(
+    results_g2$edges %>%
+      dplyr::select(
+        edge_id,
+        node1,
+        node2,
+
+        weight_female =
+          weight,
+
+        sign_female =
+          sign,
+
+        edge_betweenness_female =
+          edge_betweenness
+      ),
+    by = c(
+      "edge_id",
+      "node1",
+      "node2"
+    )
+  )
+
+
+# ============================================================
+# CLASSIFY EDGE STATUS AND SIGN CHANGES
+# ============================================================
+
+edge_comparison <- edge_comparison %>%
+  dplyr::mutate(
+    edge_status = case_when(
+
+      !is.na(weight_male) &
+        !is.na(weight_female) ~
+        "shared",
+
+      !is.na(weight_male) &
+        is.na(weight_female) ~
+        "male_only",
+
+      is.na(weight_male) &
+        !is.na(weight_female) ~
+        "female_only",
+
+      TRUE ~
+        NA_character_
+    ),
+
+    sign_change = case_when(
+
+      edge_status != "shared" ~
+        NA_character_,
+
+      sign_male == "positive" &
+        sign_female == "negative" ~
+        "positive_to_negative",
+
+      sign_male == "negative" &
+        sign_female == "positive" ~
+        "negative_to_positive",
+
+      sign_male == "positive" &
+        sign_female == "positive" ~
+        "positive_to_positive",
+
+      sign_male == "negative" &
+        sign_female == "negative" ~
+        "negative_to_negative",
+
+      sign_male == "zero" &
+        sign_female == "positive" ~
+        "zero_to_positive",
+
+      sign_male == "zero" &
+        sign_female == "negative" ~
+        "zero_to_negative",
+
+      sign_male == "positive" &
+        sign_female == "zero" ~
+        "positive_to_zero",
+
+      sign_male == "negative" &
+        sign_female == "zero" ~
+        "negative_to_zero",
+
+      sign_male == "zero" &
+        sign_female == "zero" ~
+        "zero_to_zero",
+
+      TRUE ~
+        "other"
+    ),
+
+    edge_betweenness_change =
+      edge_betweenness_female -
+      edge_betweenness_male
+  )
+
+edge_comparison <- edge_comparison %>%
+  dplyr::mutate(
+    sign_change = dplyr::case_when(
+      edge_status != "shared" ~ NA_character_,
+
+      sign_male == "positive" &
+        sign_female == "negative" ~
+        "positive_to_negative",
+
+      sign_male == "negative" &
+        sign_female == "positive" ~
+        "negative_to_positive",
+
+      TRUE ~ NA_character_
+    ),
+
+    edge_betweenness_change =
+      edge_betweenness_female -
+      edge_betweenness_male
+  )
+
+# ============================================================
+# SAVE COMPLETE EDGE COMPARISON
+# ============================================================
+
+readr::write_csv(
+  edge_comparison,
+  file.path(
+    outdir,
+    "edge_property_comparison.csv"
+  )
+)
+
+
+# ============================================================
+# SIGN-SWITCHED EDGES ONLY
+#
+# Male positive -> Female negative
+# Male negative -> Female positive
+# ============================================================
+
+sign_switched_edges <- edge_comparison %>%
+  dplyr::filter(
+    !is.na(sign_change)
+  ) %>%
+  dplyr::arrange(
+    sign_change,
+    node1,
+    node2
+  )
+
+# sign_switched_edges <- edge_comparison %>%
+#   dplyr::filter(
+#     sign_change %in% c(
+#       "positive_to_negative",
+#       "negative_to_positive"
+#     )
+#   ) %>%
+#   dplyr::arrange(
+#     sign_change,
+#     node1,
+#     node2
+#   )
+
+print(
+  sign_switched_edges
+)
+
+readr::write_csv(
+  sign_switched_edges,
+  file.path(
+    outdir,
+    "sign_switched_edges.csv"
+  )
+)
+
+
+# ============================================================
+# EDGE SIGN CHANGE SUMMARY
+# ============================================================
+
+n_shared_edges <- sum(
+  edge_comparison$edge_status == "shared",
+  na.rm = TRUE
+)
+
+edge_sign_summary <- sign_switched_edges %>%
+  dplyr::count(
+    sign_change,
+    name = "n_edges"
+  ) %>%
+  dplyr::mutate(
+    percent_shared_edges =
+      100 * n_edges / n_shared_edges
+  )
+
+
+# edge_sign_summary <- edge_comparison %>%
+#   dplyr::filter(
+#     edge_status == "shared"
+#   ) %>%
+#   dplyr::count(
+#     sign_change,
+#     name = "n_edges"
+#   ) %>%
+#   dplyr::mutate(
+#     percent_shared_edges =
+#       100 *
+#       n_edges /
+#       sum(n_edges)
+#   ) %>%
+#   dplyr::arrange(
+#     desc(n_edges)
+#   )
+
+print(
+  edge_sign_summary
+)
+
+readr::write_csv(
+  edge_sign_summary,
+  file.path(
+    outdir,
+    "edge_sign_change_summary.csv"
+  )
+)
+
+
+# ============================================================
+# EDGE PRESENCE SUMMARY
+# ============================================================
+
+edge_status_summary <- edge_comparison %>%
+  dplyr::count(
+    edge_status,
+    name = "n_edges"
+  ) %>%
+  dplyr::mutate(
+    percent_edges =
+      100 *
+      n_edges /
+      sum(n_edges)
+  )
+
+print(
+  edge_status_summary
+)
+
+readr::write_csv(
+  edge_status_summary,
+  file.path(
+    outdir,
+    "edge_status_summary.csv"
+  )
+)
+
+
+# ============================================================
+# FINISHED
+# ============================================================
+
+message(
+  "\nAnalysis complete."
+)
+
+message(
+  "Results saved to: ",
+  outdir
+)
+```
+## statistical analyses
+```{r}
+# ============================================================
+# STATISTICAL COMPARISON OF NODE AND EDGE PROPERTIES
+# ============================================================
+
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(readr)
+library(purrr)
+
+
+# ============================================================
+# NODE-LEVEL PROPERTIES
+#
+# Compare only nodes present in BOTH networks.
+# Paired Wilcoxon signed-rank test.
+# ============================================================
+
+node_metrics <- c(
+  "degree",
+  "clustering_coefficient",
+  "closeness",
+  "eccentricity",
+  "stress",
+  "betweenness"
+)
+
+
+# ============================================================
+# FUNCTION FOR PAIRED NODE TEST
+# ============================================================
+
+test_node_metric <- function(
+  metric,
+  node_df
+) {
+
+  male_col <- paste0(
+    metric,
+    "_male"
+  )
+
+  female_col <- paste0(
+    metric,
+    "_female"
+  )
+
+  # ----------------------------------------------------------
+  # Keep only shared nodes with both measurements available
+  # ----------------------------------------------------------
+
+  test_df <- node_df %>%
+    dplyr::filter(
+      node_status == "shared"
+    ) %>%
+    dplyr::select(
+      node,
+      male = dplyr::all_of(male_col),
+      female = dplyr::all_of(female_col)
+    ) %>%
+    dplyr::filter(
+      !is.na(male),
+      !is.na(female),
+      is.finite(male),
+      is.finite(female)
+    )
+
+  # ----------------------------------------------------------
+  # Require enough matched nodes
+  # ----------------------------------------------------------
+
+  if (nrow(test_df) < 2) {
+
+    return(
+      tibble(
+        level = "node",
+        metric = metric,
+        n_pairs = nrow(test_df),
+        mean_male = NA_real_,
+        sd_male = NA_real_,
+        median_male = NA_real_,
+        iqr_male = NA_real_,
+        mean_female = NA_real_,
+        sd_female = NA_real_,
+        median_female = NA_real_,
+        iqr_female = NA_real_,
+        median_difference = NA_real_,
+        statistic = NA_real_,
+        p_value = NA_real_
+      )
+    )
+  }
+
+  # ----------------------------------------------------------
+  # Paired Wilcoxon signed-rank test
+  # ----------------------------------------------------------
+
+  wt <- wilcox.test(
+    x = test_df$female,
+    y = test_df$male,
+    paired = TRUE,
+    exact = FALSE
+  )
+
+  tibble(
+    level = "node",
+    metric = metric,
+
+    n_pairs = nrow(
+      test_df
+    ),
+
+    mean_male = mean(
+      test_df$male
+    ),
+
+    sd_male = sd(
+      test_df$male
+    ),
+
+    median_male = median(
+      test_df$male
+    ),
+
+    iqr_male = IQR(
+      test_df$male
+    ),
+
+    mean_female = mean(
+      test_df$female
+    ),
+
+    sd_female = sd(
+      test_df$female
+    ),
+
+    median_female = median(
+      test_df$female
+    ),
+
+    iqr_female = IQR(
+      test_df$female
+    ),
+
+    median_difference = median(
+      test_df$female -
+        test_df$male
+    ),
+
+    statistic = unname(
+      wt$statistic
+    ),
+
+    p_value = wt$p.value
+  )
+}
+
+
+# ============================================================
+# RUN NODE TESTS
+# ============================================================
+
+node_stats_tests <- purrr::map_dfr(
+  node_metrics,
+  test_node_metric,
+  node_df = node_comparison
+)
+
+
+# ============================================================
+# MULTIPLE-TESTING CORRECTION
+# ============================================================
+
+node_stats_tests <- node_stats_tests %>%
+  dplyr::mutate(
+    p_adjust_fdr = p.adjust(
+      p_value,
+      method = "BH"
+    )
+  )
+
+
+# ============================================================
+# PRINT NODE RESULTS
+# ============================================================
+
+print(
+  node_stats_tests
+)
+
+# ============================================================
+# EDGE-LEVEL TEST
+#
+# Edge betweenness:
+# paired Wilcoxon test among shared edges only
+# ============================================================
+
+shared_edges <- edge_comparison %>%
+  dplyr::filter(
+    edge_status == "shared",
+    !is.na(edge_betweenness_male),
+    !is.na(edge_betweenness_female),
+    is.finite(edge_betweenness_male),
+    is.finite(edge_betweenness_female)
+  )
+
+
+# ============================================================
+# EDGE BETWEENNESS TEST
+# ============================================================
+
+if (nrow(shared_edges) >= 2) {
+
+  edge_betweenness_test <- wilcox.test(
+    x = shared_edges$edge_betweenness_female,
+    y = shared_edges$edge_betweenness_male,
+    paired = TRUE,
+    exact = FALSE
+  )
+
+  edge_stats_test <- tibble(
+    level = "edge",
+
+    metric = "edge_betweenness",
+
+    n_pairs = nrow(
+      shared_edges
+    ),
+
+    mean_male = mean(
+      shared_edges$edge_betweenness_male
+    ),
+
+    sd_male = sd(
+      shared_edges$edge_betweenness_male
+    ),
+
+    median_male = median(
+      shared_edges$edge_betweenness_male
+    ),
+
+    iqr_male = IQR(
+      shared_edges$edge_betweenness_male
+    ),
+
+    mean_female = mean(
+      shared_edges$edge_betweenness_female
+    ),
+
+    sd_female = sd(
+      shared_edges$edge_betweenness_female
+    ),
+
+    median_female = median(
+      shared_edges$edge_betweenness_female
+    ),
+
+    iqr_female = IQR(
+      shared_edges$edge_betweenness_female
+    ),
+
+    median_difference = median(
+      shared_edges$edge_betweenness_female -
+        shared_edges$edge_betweenness_male
+    ),
+
+    statistic = unname(
+      edge_betweenness_test$statistic
+    ),
+
+    p_value = edge_betweenness_test$p.value
+  )
+
+} else {
+
+  edge_stats_test <- tibble(
+    level = "edge",
+    metric = "edge_betweenness",
+    n_pairs = nrow(shared_edges),
+    mean_male = NA_real_,
+    sd_male = NA_real_,
+    median_male = NA_real_,
+    iqr_male = NA_real_,
+    mean_female = NA_real_,
+    sd_female = NA_real_,
+    median_female = NA_real_,
+    iqr_female = NA_real_,
+    median_difference = NA_real_,
+    statistic = NA_real_,
+    p_value = NA_real_
+  )
+}
+
+# ============================================================
+# COMBINE NODE + EDGE RESULTS
+# ============================================================
+
+graph_stats_df <- dplyr::bind_rows(
+  node_stats_tests,
+  edge_stats_test
+)
+
+print(
+  graph_stats_df
+)
+
+# ============================================================
+# SAVE RESULTS
+# ============================================================
+
+readr::write_csv(
+  graph_stats_df,
+  file.path(
+    outdir,
+    "network_property_statistical_tests.csv"
+  )
+)
+
+negative_edge_comparison <- results_g1$global %>%
+  dplyr::select(
+    percent_negative_edges
+  ) %>%
+  dplyr::rename(
+    percent_negative_edges_male =
+      percent_negative_edges
+  ) %>%
+  dplyr::bind_cols(
+    results_g2$global %>%
+      dplyr::select(
+        percent_negative_edges
+      ) %>%
+      dplyr::rename(
+        percent_negative_edges_female =
+          percent_negative_edges
+      )
+  ) %>%
+  dplyr::mutate(
+    difference =
+      percent_negative_edges_female -
+      percent_negative_edges_male
+  )
+
+print(
+  negative_edge_comparison
+)
+
+readr::write_csv(
+  negative_edge_comparison,
+  file.path(
+    outdir,
+    "percent_negative_edges_comparison.csv"
+  )
+)
 ```
 
-# Function to extract lowest taxonomic labels
-
 ```{r}
-# read in files
-ps_female <- readRDS(file = here("data/spiec-easi/microbes/ps_female_asv.rds"))
-ps_male <- readRDS(file = here("data/spiec-easi/microbes/ps_male_asv.rds"))
+# ============================================================
+# CHI-SQUARE TEST:
+# PROPORTION OF NEGATIVE EDGES
+# ============================================================
 
-input_taxa <- as.data.frame(tax_table(ps_female))
+negative_edge_counts <- tibble::tibble(
+  network = c(
+    "male",
+    "female"
+  ),
 
-# get lowest taxa level
-## try converting code below to function
-for (i in 1:nrow(input_taxa)) {
-  if (input_taxa$Species[i] != "s__") {
-    input_taxa$plotnames[i] = paste(input_taxa$Genus[i], input_taxa$Species[i], "(s)", sep = " ")
-  } else if (input_taxa$Genus[i] != "g__") {
-    input_taxa$plotnames[i] = paste(input_taxa$Genus[i], "(g)", sep = " ")
-  } else if (input_taxa$Family[i] != "f__") {
-    input_taxa$plotnames[i] = paste(input_taxa$Family[i], "(f)", sep = " ")
-  } else if (input_taxa$Order[i] != "o__") {
-    input_taxa$plotnames[i] = paste(input_taxa$Order[i], "(o)", sep = " ")
-  } else if (input_taxa$Class[i] != "c__") {
-    input_taxa$plotnames[i] = paste(input_taxa$Class[i], "(c)", sep = " ")
-  } else if (input_taxa$Phylum[i] != "p__") {
-    input_taxa$plotnames[i] = paste(input_taxa$Phylum[i], "(p)", sep = " ")
-  } else {
-    input_taxa$plotnames[i] = paste(input_taxa$Kingdom[i], "(k)", sep = " ")
+  negative = c(
+    sum(results_g1$edges$weight < 0),
+    sum(results_g2$edges$weight < 0)
+  ),
+
+  non_negative = c(
+    sum(results_g1$edges$weight >= 0),
+    sum(results_g2$edges$weight >= 0)
+  )
+)
+
+print(
+  negative_edge_counts
+)
+
+negative_edge_table <- as.matrix(
+  negative_edge_counts %>%
+    dplyr::select(
+      negative,
+      non_negative
+    )
+)
+
+rownames(
+  negative_edge_table
+) <- negative_edge_counts$network
+
+print(
+  negative_edge_table
+)
+
+negative_edge_chisq <- chisq.test(
+  negative_edge_table,
+  correct = FALSE
+)
+
+print(
+  negative_edge_chisq
+)
+
+negative_edge_chisq$expected
+```
+```{r}
+negative_edge_stats <- negative_edge_counts %>%
+  dplyr::mutate(
+    total_edges =
+      negative +
+      non_negative,
+
+    percent_negative =
+      100 *
+      negative /
+      total_edges
+  )
+
+negative_edge_test_results <- tibble::tibble(
+  test = "Chi-square test of negative-edge proportion",
+
+  male_negative_edges =
+    negative_edge_stats$negative[
+      negative_edge_stats$network == "male"
+    ],
+
+  male_total_edges =
+    negative_edge_stats$total_edges[
+      negative_edge_stats$network == "male"
+    ],
+
+  male_percent_negative =
+    negative_edge_stats$percent_negative[
+      negative_edge_stats$network == "male"
+    ],
+
+  female_negative_edges =
+    negative_edge_stats$negative[
+      negative_edge_stats$network == "female"
+    ],
+
+  female_total_edges =
+    negative_edge_stats$total_edges[
+      negative_edge_stats$network == "female"
+    ],
+
+  female_percent_negative =
+    negative_edge_stats$percent_negative[
+      negative_edge_stats$network == "female"
+    ],
+
+  chi_square =
+    unname(
+      negative_edge_chisq$statistic
+    ),
+
+  df =
+    unname(
+      negative_edge_chisq$parameter
+    ),
+
+  p_value =
+    negative_edge_chisq$p.value
+)
+
+print(
+  negative_edge_test_results
+)
+
+readr::write_csv(
+  negative_edge_test_results,
+  file.path(
+    outdir,
+    "negative_edge_chisquare_test.csv"
+  )
+)
+```
+
+
+
+
+
+
+
+
+## male extended (not going to use)
+```{r}
+# ============================================================
+# Signed weighted GraphML network analysis
+# ============================================================
+
+library(igraph)
+library(dplyr)
+library(tibble)
+library(readr)
+
+# ============================================================
+# Input
+# ============================================================
+
+graph_file <- here("data/cytoscape/male_network.graphml")
+
+g <- read_graph(
+  graph_file,
+  format = "graphml"
+)
+
+# ============================================================
+# Basic QC
+# ============================================================
+
+print(g)
+
+message("Directed: ", is_directed(g))
+message("Nodes: ", vcount(g))
+message("Edges: ", ecount(g))
+
+message(
+  "Edge attributes: ",
+  paste(edge_attr_names(g), collapse = ", ")
+)
+
+message(
+  "Vertex attributes: ",
+  paste(vertex_attr_names(g), collapse = ", ")
+)
+
+# ============================================================
+# Check weights
+# ============================================================
+
+if (!"weight" %in% edge_attr_names(g)) {
+  stop("No edge attribute named 'weight' was found.")
+}
+
+E(g)$weight <- as.numeric(E(g)$weight)
+
+if (anyNA(E(g)$weight)) {
+  warning("Some edge weights are NA.")
+}
+
+message(
+  "Weight range: ",
+  paste(
+    range(E(g)$weight, na.rm = TRUE),
+    collapse = " to "
+  )
+)
+
+message(
+  "Positive edges: ",
+  sum(E(g)$weight > 0, na.rm = TRUE)
+)
+
+message(
+  "Negative edges: ",
+  sum(E(g)$weight < 0, na.rm = TRUE)
+)
+
+# ============================================================
+# Edge weight representations
+# ============================================================
+
+E(g)$abs_weight <- abs(E(g)$weight)
+
+E(g)$sign <- case_when(
+  E(g)$weight > 0 ~ "positive",
+  E(g)$weight < 0 ~ "negative",
+  TRUE ~ "zero"
+)
+
+E(g)$positive_weight <- pmax(
+  E(g)$weight,
+  0
+)
+
+E(g)$negative_weight <- pmax(
+  -E(g)$weight,
+  0
+)
+
+epsilon <- 1e-8
+
+E(g)$distance_abs <- 1 / (
+  E(g)$abs_weight + epsilon
+)
+
+# ============================================================
+# GLOBAL NETWORK STATISTICS
+# ============================================================
+
+comp <- components(g)
+
+degree_values <- degree(
+  g,
+  mode = "all"
+)
+
+abs_strength <- strength(
+  g,
+  mode = "all",
+  weights = E(g)$abs_weight
+)
+
+signed_strength <- strength(
+  g,
+  mode = "all",
+  weights = E(g)$weight
+)
+
+global_stats <- tibble(
+  n_nodes = vcount(g),
+  n_edges = ecount(g),
+
+  density = edge_density(
+    g,
+    loops = FALSE
+  ),
+
+  n_components = comp$no,
+
+  largest_component_n = max(
+    comp$csize
+  ),
+
+  mean_degree = mean(
+    degree_values
+  ),
+
+  median_degree = median(
+    degree_values
+  ),
+
+  mean_abs_strength = mean(
+    abs_strength
+  ),
+
+  mean_signed_strength = mean(
+    signed_strength
+  ),
+
+  mean_edge_weight = mean(
+    E(g)$weight,
+    na.rm = TRUE
+  ),
+
+  mean_abs_edge_weight = mean(
+    E(g)$abs_weight,
+    na.rm = TRUE
+  ),
+
+  median_abs_edge_weight = median(
+    E(g)$abs_weight,
+    na.rm = TRUE
+  ),
+
+  proportion_positive = mean(
+    E(g)$weight > 0,
+    na.rm = TRUE
+  ),
+
+  proportion_negative = mean(
+    E(g)$weight < 0,
+    na.rm = TRUE
+  ),
+
+  degree_assortativity = assortativity_degree(
+    g,
+    directed = FALSE
+  ),
+
+  global_transitivity = transitivity(
+    g,
+    type = "global"
+  )
+)
+
+print(global_stats)
+
+# ============================================================
+# Largest connected component
+# ============================================================
+
+largest_component_id <- which.max(
+  comp$csize
+)
+
+g_lcc <- induced_subgraph(
+  g,
+  vids = which(
+    comp$membership == largest_component_id
+  )
+)
+
+E(g_lcc)$distance_abs <- 1 / (
+  abs(E(g_lcc)$weight) + epsilon
+)
+
+global_stats$mean_path_length_abs <- mean_distance(
+  g_lcc,
+  directed = FALSE,
+  weights = E(g_lcc)$distance_abs
+)
+
+global_stats$diameter_abs <- diameter(
+  g_lcc,
+  directed = FALSE,
+  weights = E(g_lcc)$distance_abs
+)
+
+# ============================================================
+# NODE-LEVEL STATISTICS
+# ============================================================
+
+node_names <- V(g)$name
+
+if (is.null(node_names)) {
+  node_names <- as.character(
+    seq_len(vcount(g))
+  )
+}
+
+# ------------------------------------------------------------
+# Degree
+# ------------------------------------------------------------
+
+node_degree <- degree(
+  g,
+  mode = "all"
+)
+
+# ------------------------------------------------------------
+# Absolute strength
+# ------------------------------------------------------------
+
+node_abs_strength <- strength(
+  g,
+  mode = "all",
+  weights = E(g)$abs_weight
+)
+
+# ------------------------------------------------------------
+# Signed/net strength
+# ------------------------------------------------------------
+
+node_signed_strength <- strength(
+  g,
+  mode = "all",
+  weights = E(g)$weight
+)
+
+# ------------------------------------------------------------
+# Positive and negative strength
+# ------------------------------------------------------------
+
+positive_strength <- rep(
+  0,
+  vcount(g)
+)
+
+negative_strength <- rep(
+  0,
+  vcount(g)
+)
+
+positive_degree <- rep(
+  0,
+  vcount(g)
+)
+
+negative_degree <- rep(
+  0,
+  vcount(g)
+)
+
+edge_ends <- ends(
+  g,
+  E(g),
+  names = FALSE
+)
+
+for (i in seq_len(ecount(g))) {
+
+  a <- edge_ends[i, 1]
+  b <- edge_ends[i, 2]
+
+  w <- E(g)$weight[i]
+
+  if (w > 0) {
+
+    positive_strength[a] <- positive_strength[a] + w
+    positive_strength[b] <- positive_strength[b] + w
+
+    positive_degree[a] <- positive_degree[a] + 1
+    positive_degree[b] <- positive_degree[b] + 1
+
+  } else if (w < 0) {
+
+    negative_strength[a] <- negative_strength[a] + abs(w)
+    negative_strength[b] <- negative_strength[b] + abs(w)
+
+    negative_degree[a] <- negative_degree[a] + 1
+    negative_degree[b] <- negative_degree[b] + 1
   }
 }
+
+# ============================================================
+# Path-based node centrality
+# ============================================================
+
+node_betweenness <- betweenness(
+  g,
+  directed = FALSE,
+  weights = E(g)$distance_abs,
+  normalized = TRUE
+)
+
+node_closeness <- closeness(
+  g,
+  mode = "all",
+  weights = E(g)$distance_abs,
+  normalized = TRUE
+)
+
+# ============================================================
+# Local topology
+# ============================================================
+
+local_clustering <- transitivity(
+  g,
+  type = "local",
+  isolates = "zero"
+)
+
+mean_neighbor_degree <- knn(
+  g
+)$knn
+
+node_stats <- tibble(
+  node = node_names,
+
+  degree = node_degree,
+
+  positive_degree = positive_degree,
+
+  negative_degree = negative_degree,
+
+  abs_strength = node_abs_strength,
+
+  positive_strength = positive_strength,
+
+  negative_strength = negative_strength,
+
+  signed_strength = node_signed_strength,
+
+  betweenness_abs = node_betweenness,
+
+  closeness_abs = node_closeness,
+
+  local_clustering = local_clustering,
+
+  mean_neighbor_degree = mean_neighbor_degree
+)
+
+node_stats <- node_stats %>%
+  dplyr::mutate(
+    negative_edge_fraction =
+      negative_degree /
+      pmax(degree, 1),
+
+    negative_strength_fraction =
+      negative_strength /
+      pmax(abs_strength, 1e-12),
+
+    strength_balance =
+      positive_strength -
+      negative_strength
+  )
+
+# ============================================================
+# EDGE-LEVEL STATISTICS
+# ============================================================
+
+edge_df <- as_data_frame(
+  g,
+  what = "edges"
+) %>%
+  dplyr::mutate(
+    edge_id = seq_len(n())
+  )
+
+edge_df <- edge_df %>%
+  dplyr::mutate(
+    weight = as.numeric(weight),
+
+    abs_weight = abs(weight),
+
+    sign = case_when(
+      weight > 0 ~ "positive",
+      weight < 0 ~ "negative",
+      TRUE ~ "zero"
+    )
+  )
+
+edge_df$edge_betweenness <- edge_betweenness(
+  g,
+  directed = FALSE,
+  weights = E(g)$distance_abs
+)
+
+edge_common_neighbors <- numeric(
+  ecount(g)
+)
+
+edge_jaccard <- numeric(
+  ecount(g)
+)
+
+for (i in seq_len(ecount(g))) {
+
+  a <- edge_ends[i, 1]
+  b <- edge_ends[i, 2]
+
+  neighbors_a <- as.integer(
+    neighbors(
+      g,
+      a,
+      mode = "all"
+    )
+  )
+
+  neighbors_b <- as.integer(
+    neighbors(
+      g,
+      b,
+      mode = "all"
+    )
+  )
+
+  common_neighbors <- intersect(
+    neighbors_a,
+    neighbors_b
+  )
+
+  union_neighbors <- union(
+    neighbors_a,
+    neighbors_b
+  )
+
+  edge_common_neighbors[i] <- length(
+    common_neighbors
+  )
+
+  edge_jaccard[i] <- ifelse(
+    length(union_neighbors) == 0,
+    0,
+    length(common_neighbors) /
+      length(union_neighbors)
+  )
+}
+
+edge_df$common_neighbors <- edge_common_neighbors
+# edge_df$jaccard <- edge_jaccard
+
+# bridge_ids <- bridges(g)
+# 
+# edge_df$is_bridge <- seq_len(
+#   ecount(g)
+# ) %in% bridge_ids
+
+edge_df %>%
+  dplyr::select(
+    edge_id,
+    from,
+    to,
+    weight,
+    abs_weight,
+    sign,
+    edge_betweenness,
+    common_neighbors,
+    jaccard,
+  #  is_bridge,
+    dplyr::everything()
+  )
 ```
 
-```{r}
-# load rds files
-test_f <- readRDS(here("data/spiec-easi/microbes/edge_mat_f.rds"))
-test_m <- readRDS(here("data/spiec-easi/microbes/edge_mat_m.rds"))
-```
-
-
-```{r}
-# create igraph object
-ig2.gl.f.weighted <- adj2igraph(test_f,  vertex.attr=(name=input_taxa))
-
-# create network in cytoscape
-createNetworkFromIgraph(ig2.gl.f.weighted, title = "Female")
-```
-
-```{r}
-# create igraph object
-ig2.gl.m.weighted <- adj2igraph(test_m,  vertex.attr=(name=input_taxa))
-
-# create network in cytoscape
-createNetworkFromIgraph(ig2.gl.m.weighted, title = "Male")
-```
-```{r}
-saveRDS(ig2.gl.f.weighted, here("data/spiec-easi/microbes/ig_weightcor_f.rds"))
-saveRDS(ig2.gl.m.weighted, here("data/spiec-easi/microbes/ig_weightcor_m.rds"))
-```
-
-```{r}
-ig2.gl.f.weighted <- readRDS(here("data/spiec-easi/microbes/ig_weightcor_f.rds"))
-ig2.gl.m.weighted <- readRDS(here("data/spiec-easi/microbes/ig_weightcor_m.rds"))
-```
-
-
-```{r}
-# Assign the sample label to edges
-E(ig2.gl.f.weighted)$sample <- "female"
-E(ig2.gl.m.weighted)$sample <- "male"
-
-combined_graph <- igraph::union(ig2.gl.f.weighted, ig2.gl.m.weighted)
-
-#E(combined_graph)$weight <- as.numeric(E(combined_graph)$weight)
-
-E(combined_graph)$weight_1 <- as.numeric(E(combined_graph)$weight_1)
-
-E(combined_graph)$weight_2 <- as.numeric(E(combined_graph)$weight_2)
-
-# Ensure Cytoscape is running
-cytoscapePing()
-
-# Convert to Cytoscape network
-createNetworkFromIgraph(combined_graph, "Combined_Male_Female_Network")
-```
-
-
-```{r}
-# Get the current edge table to inspect column types
-edge_table <- getTableColumns(table = "edge")
-
-# Convert a specific column (e.g., "weight") from character to numeric
-edge_table$weight_1 <- as.numeric(edge_table$weight_1)
-
-# Update the table in Cytoscape
-loadTableData(edge_table, table = "edge", data.key.column = edge_table$SUID)
-
-```
-
-
-
-
-
-
-
-
-
-## 
-```{r}
-# read in picrust KO to ASV predicted file
-ko_predicted <- read.csv(here("data/picrust2/picrust2_out_pipeline/KO_predicted.tsv"),
-                         sep = "\t",
-                         row.names = 1)
-
-graph_nodes <- read.csv(here("data/spiec-easi/microbes/female_node_table_p20.csv"), row.names = "name")
-
-# Convert rownames to a column for merging
-ko_predicted$ASV <- rownames(ko_predicted)
-graph_nodes$ASV <- rownames(graph_nodes)
-
-# Merge dataframes by ASV
-merged_data <- merge(graph_nodes, ko_predicted[, c("ASV", "K01195")], by = "ASV")
-
-# Filter ASVs with nonzero K01195
-asvs_with_K01195 <- merged_data$ASV[merged_data$K01195 > 0]
-
-# Print result
-print(asvs_with_K01195)
-```
-
-
-## Try to find infomap clusters
-```{r}
-# create unweighted graphs
-unweighted_f <- ifelse(test_f == 0, 0, 1)
-unweighted_m <- ifelse(test_m == 0, 0, 1)
-
-# create igraph object
-ig2_m_unweighted <- adj2igraph(unweighted_m,  vertex.attr=(name=input_taxa))
-ig2_f_unweighted <- adj2igraph(unweighted_f, vertex.attr = (name=input_taxa))
-cluster_m <- cluster_infomap(ig2_m_unweighted)
-cluster_f <- cluster_infomap(ig2_f_unweighted)
-
-communities(cluster_m)
-communities(cluster_f)
-
-membership(cluster_m)
-membership(cluster_f)
-
-cluster_membership <- cbind(male=membership(cluster_m), female=membership(cluster_f))
-```
-
-
-
-Can go into picrust table and look at what taxa is related to what metabolites
-
-Use the top most abundant (100-150) + statistically significant + maybe most variable and use that to create network - want to see if we pick up any strains that are known to express GUSB
-
-Also run using enzymes - pick most abundant in dataset + statstically significant
-
-NOTES: want to combine the above functions into one large function

@@ -1,0 +1,2269 @@
+---
+title: "phyloseq_092326"
+author: "Blake Williams"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# Load packages
+```{r setup, include=FALSE}
+library(here)
+library(phyloseq)
+library(ggplot2)
+library(tidyverse)
+library(Biostrings)
+library(ShortRead)
+library(metagMisc)
+library(vegan)
+library(metagenomeSeq)
+library(compositions)
+library(biomformat)
+library(Maaslin2)
+library(ggpubr)
+library(ggcorrplot)
+library(reshape2)
+library(tibble)
+library(dplyr)
+library(readr)
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Prep workspace
+```{r}
+plotdir <- here("data", "manuscript", "figure2_asv")
+
+dir.create(plotdir,
+           recursive = TRUE,
+           showWarnings = FALSE)
+
+tabledir <- here("data", "manuscript", "tables")
+
+dir.create(tabledir,
+           recursive = TRUE,
+           showWarnings = FALSE)
+
+outdir <- here("data", "phyloseq")
+
+dir.create(outdir,
+           recursive = TRUE,
+           showWarnings = FALSE)
+
+# Change these to the exact labels in your metadata
+sex_reference <- 0
+sex_comparison <- 1
+
+# phyloseq object
+ps <- readRDS(file = here("data/dada2/ps_ASVs.rds"))
+
+# extract metadata
+metadata <- data.frame(sample_data(ps))
+
+# filter "healthy" participants
+metadata_healthy <- metadata %>%
+  filter(Anamnesis == '0') %>%
+  filter(Breast_disease == '0') %>%
+  filter(Combined_disease == '0') %>%
+  filter(Deficiency_of_G6PD == '0') %>%
+  filter(GDM == '0') %>%
+  filter(HDP == '0') %>%
+  filter(Hepatopathy == '0') %>%
+  filter(Hysteromyoma == '0') %>%
+  filter(Infection == '0') %>%
+  filter(Intrahepatic_cholestasis_of_pregnancy == '0') %>%
+  filter(Ovary_disease == '0') %>%
+  filter(Pelvic_adhesions == '0') %>%
+  filter(Scar_uterus == '0') %>%
+  filter(Streptococcal_infection == '0') %>%
+  filter(Thalassemia == '0') %>%
+  filter(Thyroid_disease == '0') %>%
+  filter(Uteroplacental_insufficiency == '0') %>%
+  filter(Medication_use == '0') %>%
+  filter(Progesterone_use == '0') %>%
+  filter(Twins == '0') %>%
+  filter(Hypertension == '1' | Hypertension == '2') %>%
+  drop_na(Infant_gender) %>%
+  drop_na(BMI_before_pregnancy) %>%
+  drop_na(Residency_status) %>%
+  drop_na(Gestation_week) %>%
+  drop_na(Parity) %>%
+  drop_na(Age) %>%
+  mutate(Infant_gender = as.factor(Infant_gender)) %>%
+  mutate(Infant_gender = as.factor(case_when(Infant_gender == 1 ~ 0,
+                                             Infant_gender == 2 ~ 1)))# %>%
+  # mutate(BMI_before_pregnancy = scale(BMI_before_pregnancy)) %>%
+  # mutate(Residency_status = as.factor(Residency_status)) %>%
+  # mutate(Gestation_week = scale(Gestation_week)) %>%
+  # mutate(Parity = scale(Parity)) %>%
+  # mutate(Age = scale(Age)) %>%
+  # mutate(Sex_Residency = paste0(Infant_gender, Residency_status))
+
+# ------------------------------------------------------------
+# Convert continuous variables
+# ------------------------------------------------------------
+
+metadata_healthy$Gestation_week <- as.numeric(
+  metadata_healthy$Gestation_week
+)
+
+metadata_healthy$Age <- as.numeric(
+  metadata_healthy$Age
+)
+
+metadata_healthy$BMI_before_pregnancy <- as.numeric(
+  metadata_healthy$BMI_before_pregnancy
+)
+
+metadata_healthy$Parity <- as.numeric(
+  metadata_healthy$Parity
+)
+
+
+# # ------------------------------------------------------------
+# # Center continuous variables
+# #
+# # Centering is useful because fetal-sex main
+# # effect is interpreted at mean gestational age.
+# # ------------------------------------------------------------
+# 
+# metadata_healthy$gest_week_c <-
+#   metadata_healthy$Gestation_week -
+#   mean(
+#     metadata_healthy$Gestation_week,
+#     na.rm = TRUE
+#   )
+# 
+# metadata_healthy$age_c <-
+#   metadata_healthy$Age -
+#   mean(
+#     metadata_healthy$Age,
+#     na.rm = TRUE
+#   )
+# 
+# metadata_healthy$bmi_c <-
+#   metadata_healthy$BMI_before_pregnancy -
+#   mean(
+#     metadata_healthy$BMI_before_pregnancy,
+#     na.rm = TRUE
+#   )
+# 
+# metadata_healthy$parity_c <-
+#   metadata_healthy$Parity -
+#   mean(
+#     metadata_healthy$Parity,
+#     na.rm = TRUE
+#   )
+
+# ------------------------------------------------------------
+# Center & scale continuous variables
+# so we can compare effect sizes of ega & fetal sex
+# ------------------------------------------------------------
+
+metadata_healthy$gest_week_s <-
+  scale(metadata_healthy$Gestation_week)
+
+metadata_healthy$age_s <-
+  scale(metadata_healthy$Age)
+
+metadata_healthy$bmi_s <-
+  scale(metadata_healthy$BMI_before_pregnancy)
+
+metadata_healthy$parity_s <-
+  (metadata_healthy$Parity)
+
+
+# ------------------------------------------------------------
+# Fetal sex
+# ------------------------------------------------------------
+
+metadata_healthy$fetal_sex <- factor(
+  metadata_healthy$Infant_gender
+)
+
+message("Observed fetal-sex levels:")
+print(
+  levels(metadata_healthy$fetal_sex)
+)
+
+if (
+  !sex_reference %in%
+    levels(metadata_healthy$fetal_sex)
+) {
+  stop(
+    "sex_reference = '",
+    sex_reference,
+    "' was not found in Infant_gender."
+  )
+}
+
+if (
+  !sex_comparison %in%
+    levels(metadata_healthy$fetal_sex)
+) {
+  stop(
+    "sex_comparison = '",
+    sex_comparison,
+    "' was not found in Infant_gender."
+  )
+}
+
+# metadata_healthy$fetal_sex <- relevel(
+#   metadata_healthy$fetal_sex,
+#   ref = sex_reference
+# )
+
+# 0 = reference sex
+# 1 = comparison sex
+metadata_healthy$fetal_sex_binary <- ifelse(
+  metadata_healthy$fetal_sex == sex_comparison,
+  1,
+  0
+)
+
+
+# ------------------------------------------------------------
+# Sex x gestational-age interaction
+# ------------------------------------------------------------
+
+metadata_healthy$sex_x_ega <-
+  metadata_healthy$fetal_sex_binary *
+  metadata_healthy$gest_week_s
+
+
+# ------------------------------------------------------------
+# Categorical adjustment covariates
+# ------------------------------------------------------------
+
+metadata_healthy$Residency_status <- factor(
+  metadata_healthy$Residency_status
+)
+
+# create phyloseq object with only healthy samples
+ps.healthy <- ps
+sample_data(ps.healthy) <- metadata_healthy
+
+# save ps.healthy
+saveRDS(ps.healthy, file = here("data/phyloseq/ps_healthy.rds"))
+```
+
+
+# CSS normalize all asvs
+```{r}
+# Normalize data CSS
+ps_css<-ps.healthy
+mg1<-phyloseq_to_metagenomeSeq(ps.healthy)
+mg2<-metagenomeSeq::filterData (mg1, present = 1) 
+p = metagenomeSeq::cumNormStatFast(mg2)
+mg2 <- metagenomeSeq::cumNorm(mg2, p =p) 
+otu_table_ps_css= metagenomeSeq::MRcounts(mg2 , norm = TRUE, log = FALSE)
+otu_table_ps_css<-apply(otu_table_ps_css,c(1,2),function(x){round(x,0)})
+otu_table(ps_css)<-otu_table(otu_table_ps_css, taxa_are_rows=TRUE)
+write.table(otu_table_ps_css,
+            file=here("data/phyloseq/otu_table_ps_all_css.txt"),
+            sep="\t",col.names = TRUE, row.names = TRUE)
+saveRDS(ps_css, file=here("data/phyloseq/ps_all_css.rds"))
+
+nrow(ps_css@otu_table)
+ncol(ps_css@otu_table)
+
+# use this as input for picrust2 - process using prep_picrust_from_phyloseq_css.rmd
+```
+
+# Filter data
+
+```{r}
+# ============================================================
+# Start with healthy samples
+# ============================================================
+
+ps3 <- ps.healthy
+
+cat(
+  "Starting:",
+  ntaxa(ps3), "ASVs,",
+  nsamples(ps3), "samples\n"
+)
+
+# ============================================================
+# 1. Remove ASVs with zero counts across all samples
+# ============================================================
+
+ps3 <- prune_taxa(
+  taxa_sums(ps3) > 0,
+  ps3
+)
+
+cat(
+  "After removing zero-total ASVs:",
+  ntaxa(ps3), "ASVs,",
+  nsamples(ps3), "samples\n"
+)
+
+# ============================================================
+# 2. Remove ASVs with less than 10 counts in at least 1 sample
+# ============================================================
+
+otu_mat <- as(
+  otu_table(ps3),
+  "matrix"
+)
+
+if (!taxa_are_rows(ps3)) {
+  otu_mat <- t(otu_mat)
+}
+
+keep_asv <- apply(
+  otu_mat,
+  1,
+  function(x) {
+    any(x >= 10, na.rm = TRUE)
+  }
+)
+
+ps4 <- prune_taxa(
+  keep_asv,
+  ps3
+)
+
+# ============================================================
+# 3. Remove low-abundance ASVs
+#
+# Keep an ASV if it reaches >= 0.1% relative abundance
+# in at least one sample
+# ============================================================
+
+ps_rel <- transform_sample_counts(
+  ps4,
+  function(x) {
+    if (sum(x) == 0) {
+      return(x)
+    }
+
+    x / sum(x)
+  }
+)
+
+keep_taxa <- apply(
+  as(otu_table(ps_rel), "matrix"),
+  if (taxa_are_rows(ps_rel)) 1 else 2,
+  function(x) {
+    any(x >= 0.01, na.rm = TRUE)
+  }
+)
+
+ps5 <- prune_taxa(
+  keep_taxa,
+  ps4
+)
+
+cat(
+  "After abundance filter:",
+  ntaxa(ps5), "ASVs,",
+  nsamples(ps5), "samples\n"
+)
+
+# ============================================================
+# 4. Remove samples with fewer than 2 remaining ASVs
+# ============================================================
+
+otu_mat <- as(
+  otu_table(ps5),
+  "matrix"
+)
+
+if (!taxa_are_rows(ps5)) {
+  otu_mat <- t(otu_mat)
+}
+
+n_ASVs_per_sample <- colSums(
+  otu_mat > 0,
+  na.rm = TRUE
+)
+
+samples_to_remove <- names(
+  n_ASVs_per_sample[
+    n_ASVs_per_sample < 2
+  ]
+)
+
+cat(
+  "Samples with <2 ASVs:",
+  length(samples_to_remove),
+  "\n"
+)
+
+if (length(samples_to_remove) > 0) {
+  print(samples_to_remove)
+}
+
+ps6 <- prune_samples(
+  n_ASVs_per_sample >= 2,
+  ps5
+)
+
+cat(
+  "Final:",
+  ntaxa(ps6), "ASVs,",
+  nsamples(ps6), "samples\n"
+)
+
+```
+
+## CSS normalize filtered data
+```{r}
+# ============================================================
+# CSS
+# ============================================================
+ps_css<-ps6
+mg1<-phyloseq_to_metagenomeSeq(ps6)
+mg2<-metagenomeSeq::filterData (mg1, present = 1) 
+p = metagenomeSeq::cumNormStatFast(mg2)
+mg2 <- metagenomeSeq::cumNorm(mg2, p =p) 
+otu_table_ps_css= metagenomeSeq::MRcounts(mg2 , norm = TRUE, log = FALSE)
+otu_table_ps_css<-apply(otu_table_ps_css,c(1,2),function(x){round(x,0)})
+otu_table(ps_css)<-otu_table(otu_table_ps_css, taxa_are_rows=TRUE)
+write.table(otu_table_ps_css,
+            file=file.path(outdir,'otu_table_ps_css.txt'),
+            sep="\t",col.names = TRUE, row.names = TRUE)
+saveRDS(ps_css, file=file.path(outdir, 'ps_css.rds'))
+
+print(paste0("OTU table rows: ", nrow(ps_css@otu_table)))
+print(paste0("OTU table cols: ", ncol(ps_css@otu_table)))
+```
+
+```{r}
+tax_table <- tax_table(ps_css)
+# Convert taxonomy table to data frame for easier manipulation
+tax_df <- as.data.frame(tax_table)
+
+# Replace "p__" with "unspecified" in the taxonomy table
+tax_df <- apply(tax_df, MARGIN = 2, function(x) gsub("^p__", "unspecified", x))
+
+# Convert back to taxonomy table class
+tax_table(ps_css) <- tax_df
+
+#Step 2: Taxa agglomerate
+####################################################################
+ps_phylum <- tax_glom(ps_css, "Phylum")
+
+#Step 3: Plot abundances
+####################################################################
+taxa_names(ps_phylum) <- phyloseq::tax_table(ps_phylum)[, "Phylum"]
+p_phyla <- psmelt(ps_phylum) %>%
+  ggplot(data = ., aes(x = Infant_gender, y = Abundance)) +
+    #geom_boxplot(outlier.shape  = NA) +
+    geom_violin() +
+    geom_jitter(aes(color = OTU), height = 0, width = .2) +
+    labs(x = "", y = "CSS Normalized Abundance", angle = 45) +
+    facet_wrap(~ OTU, scales = "free", nrow = 2) +
+    scale_x_discrete(labels = c("Male", "Female")) +
+    theme(axis.text.x = element_text(angle = 45, vjust = 0.5, hjust=0.5))+
+  stat_compare_means()
+
+ggsave(file.path(plotdir, "phylum_abundance.png"), plot = p_phyla, dpi = 600, 
+       width = 12, height = 8, units = "in", limitsize = FALSE)
+```
+
+
+## Alpha diveristy
+```{r}
+richness=estimate_richness(ps_css, split = TRUE, measures = c("Shannon", "InvSimpson", "Chao1"))
+richness=data.frame(sample_data(ps_css),richness,stringsAsFactors=FALSE)
+richness[,"fetal_sex_binary"]<-as.factor(sample_data(ps_css)$fetal_sex_binary)
+richness[,"Residency_status"]<-as.factor(sample_data(ps_css)$Residency_status)
+richness[,"parity_s"]<-sample_data(ps_css)$parity_s
+richness[,"gest_week_s"]<-sample_data(ps_css)$gest_week_s
+richness[,"age_s"]<-sample_data(ps_css)$age_s
+richness[,"bmi_s"]<-sample_data(ps_css)$bmi_s
+
+richness_pvalues<-c()
+aa<-summary(lm(Chao1 ~ fetal_sex_binary + Residency_status + parity_s + gest_week_s
+        + age_s + bmi_s + fetal_sex_binary*gest_week_s, data=richness))
+               
+richness_pvalues<-rbind(richness_pvalues,
+                      cbind(Method=rep("Chao1",nrow(aa$coefficients)),aa$coefficients))
+
+aa<-summary(lm(Shannon ~fetal_sex_binary + Residency_status + parity_s + gest_week_s
+        + age_s + bmi_s + fetal_sex_binary*gest_week_s, data=richness))
+richness_pvalues<-rbind(richness_pvalues,
+                    cbind(Method=rep("Shannon",nrow(aa$coefficients)),aa$coefficients))
+
+aa<-summary(lm(InvSimpson ~ fetal_sex_binary + Residency_status + parity_s + gest_week_s
+        + age_s + bmi_s + fetal_sex_binary*gest_week_s, data=richness))
+
+richness_pvalues<-rbind(richness_pvalues,cbind(Method=rep("InvSimpson",nrow(aa$coefficients)),aa$coefficients))
+
+
+richness_pvalues[rownames(richness_pvalues) %in% c("fetal_sex_bin","fetal_sex_binary:gest_week_s"),]
+
+richness_pvalues[as.numeric(richness_pvalues[,"Pr(>|t|)"])<0.01,]
+
+# no difference in diversity except for residency status for Chao1
+#      Method Estimate Std. Error t value Pr(>|t|)
+#                   Method       Estimate           Std. Error           t value            Pr(>|t|)               
+# (Intercept)       "Chao1"      "153.074961369713" "3.18820607199869"   "48.0128818253426" "8.74474436255827e-185"
+# Residency_status2 "Chao1"      "14.0732780451513" "4.61591121108549"   "3.04886238092127" "0.00242475889881305"  
+# (Intercept)       "Shannon"    "3.51492094622092" "0.0297247165242365" "118.249098973071" "0"                    
+# (Intercept)       "InvSimpson" "18.214543967866"  "0.587835818922007"  "30.9857674227277" "2.59592794636019e-116"
+
+write.table(richness_pvalues,
+        file=file.path(outdir, "richness_pvalues_LinearModels.txt"),
+        sep="\t",col.names = TRUE, row.names = TRUE)
+```
+
+```{r}
+levels(richness$fetal_sex_binary) <- c("M", "F")
+
+# Convert data from wide to long format for faceting
+data_long <- richness %>%
+  dplyr::select(Sex = fetal_sex_binary, gest_week_s, Gestation_week, Shannon, InvSimpson, Chao1) %>%
+  pivot_longer(cols = c(Shannon, InvSimpson, Chao1), 
+               names_to = "Diversity_Metric", 
+               values_to = "Adjusted_Value")
+
+cols <- c("M" = "#50B93A", "F" = "#9C7FB9")
+
+new_labels <- c(Shannon = "Shannon Diversity",
+                InvSimpson = "Simpson Diversity",
+                Chao1 = "Chao1 Diversity")
+# Create the plot
+ggplot(data_long, aes(x = Gestation_week, y = Adjusted_Value, color = Sex, fill = Sex)) +
+  geom_smooth(method = "loess", span = 0.75, se = TRUE, alpha = 0.3) +  # Smoothed trend lines
+  facet_wrap(~ Diversity_Metric, scales = "free_y", labeller = labeller(Diversity_Metric = new_labels)) +  # Separate facets for each metric
+  scale_color_manual(values = cols) +  # Adjust line colors for sex
+  scale_fill_manual(values = cols) +   # Adjust confidence interval colors
+  labs(title = "Adjusted Alpha Diversity Metrics Over Gestation Weeks",
+       x = "Gestation Week",
+       y = "Adjusted Diversity Metric",
+       color = "Sex",
+       fill = "Sex") +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold", size = 12),
+        axis.text.x = element_text(size = 12),
+        axis.text.y = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        plot.title = element_text(
+        size = 12)
+  )
+
+ggsave(file.path(plotdir, "alpha_div_over_gestation_weeks.png"), plot = last_plot(), dpi = 600, 
+       width = 12, height = 8, units = "in", limitsize = FALSE)
+```
+```{r}
+my_comparisons <- list(c("M", "F"))
+
+ggplot(data_long, aes(x = Sex, y = Adjusted_Value, fill = Sex)) +
+    geom_violin(trim = FALSE) +
+    facet_wrap(~ Diversity_Metric, scales = "free_y", labeller = labeller(Diversity_Metric = new_labels)) +
+    theme_bw() +
+    theme(text=element_text(size=24), #change font size of all text
+        axis.text=element_text(size=18), #change font size of axis text
+        axis.title=element_text(size=20), #change font size of axis titles
+        plot.title=element_text(size=24), #change font size of plot title
+        legend.text=element_text(size=24), #change font size of legend text
+        legend.title=element_text(size=24)) + #change font size of legend title 
+    labs(#title = "Violin Plot of Diversity Metrics by Infant Gender and Residency Status",
+         x = "Fetal Sex",
+         y = "Covariate-corrected alpha diversity") +
+    theme(legend.position = "bottom") +
+  scale_x_discrete(labels = c("Male", "Female")) +
+  scale_fill_manual(values = cols, guide = "none") #+
+  stat_compare_means(comparisons = my_comparisons, method = "wilcox.test", aes(label = after_stat(p.signif)), hide.ns = TRUE)
+
+ggsave(file.path(plotdir, "alpha_div_violin_2.png"), plot = last_plot(), dpi = 600, 
+       width = 9, height = 6, units = "in", limitsize = FALSE)
+```
+```{r}
+# Create boxplot with facets
+ggplot(data_long, aes(x = Sex, y = Adjusted_Value, fill = Sex)) +
+  geom_violin(trim = FALSE) +
+  geom_jitter(width = 0.2, alpha = 0.5) +  # Add individual points for visibility
+  facet_wrap(~ Diversity_Metric, scales = "free_y", labeller = labeller(Diversity_Metric = new_labels)) +  # Separate facets for each metric
+  scale_fill_manual(values = cols) +  # Adjust colors for male/female
+  labs(
+       x = "Sex",
+       y = "Diversity Metric") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  theme(strip.text = element_text(face = "bold")) +
+    theme(text=element_text(size=22), #change font size of all text
+        axis.text=element_text(size=18), #change font size of axis text
+        axis.title=element_text(size=20), #change font size of axis titles
+        plot.title=element_text(size=22), #change font size of plot title
+        legend.text=element_text(size=22), #change font size of legend text
+        legend.title=element_text(size=22)) #change font size of legend title #+
+  # stat_compare_means(comparisons = my_comparisons,
+  #                    method = "wilcox.test",
+  #                    aes(label = after_stat(p.signif)),
+  #                    hide.ns = TRUE)
+
+ggsave(file.path(plotdir, "alpha_div_violin.png"), plot = last_plot(), dpi = 600, 
+       width = 9, height = 6, units = "in", limitsize = FALSE)
+```
+
+## Beta diversity
+```{r}
+#Step 1: Calculate the Distance
+ord <- ordinate(ps_css, "PCoA", "bray", weighted = TRUE
+                , formula = fetal_sex_binary + bmi_s + age_s + parity_s + Residency_status + gest_week_s + fetal_sex_binary*gest_week_s)
+```
+
+
+```{r}
+sample_data(ps_css) <- metadata_healthy
+
+cols <- c("0" = "#50B93A", "1" = "#9C7FB9")
+
+# Percent variance explained by PC1 and PC2
+pc1_var <- round(ord$values$Relative_eig[1] * 100, 1)
+pc2_var <- round(ord$values$Relative_eig[2] * 100, 1)
+
+plot_ordination(ps_css, ord, color = "Infant_gender") +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(),
+    axis.line = element_line(colour = "black"),
+    text = element_text(size = 22),
+    axis.text = element_text(size = 18),
+    axis.title = element_text(size = 20),
+    plot.title = element_text(size = 22),
+    legend.text = element_text(size = 18),
+    legend.title = element_text(size = 22)
+  ) +
+  scale_color_manual(
+    values = cols,
+    labels = c("Male", "Female")
+  ) +
+  labs(
+    x = paste0("PCoA1 (", pc1_var, "%)"),
+    y = paste0("PCoA2 (", pc2_var, "%)"),
+    color = "Fetal Sex"
+  ) +
+  geom_point(size = 2.5) +
+  stat_ellipse(
+    aes(
+      group = Infant_gender,
+      colour = Infant_gender
+    ),
+    linewidth = 1.5
+  )
+
+ggsave(file.path(plotdir, "beta_div_pca.png"), plot = last_plot(), dpi = 600, 
+       width = 9, height = 6, units = "in", limitsize = FALSE)
+```
+## Permanova
+
+```{r}
+adonis2(t(as.matrix(otu_table(ps_css))) ~ fetal_sex_binary*gest_week_s + bmi_s + age_s + parity_s + 
+          Residency_status, data = metadata_healthy, method = "bray",
+        permutations = 9999)
+
+adonis_main <- adonis2(
+  t(as.matrix(otu_table(ps_css))) ~
+    fetal_sex_binary +
+    gest_week_s +
+    bmi_s +
+    age_s +
+    parity_s +
+    Residency_status,
+  data = metadata_healthy,
+  method = "bray",
+  permutations = 9999,
+  by = "margin"
+)
+
+adonis_main
+
+adonis_interaction <- adonis2(
+  t(as.matrix(otu_table(ps_css))) ~
+    fetal_sex_binary * gest_week_s +
+    bmi_s +
+    age_s +
+    parity_s +
+    Residency_status,
+  data = metadata_healthy,
+  method = "bray",
+  permutations = 9999,
+  by = "terms"
+)
+
+adonis_interaction
+```
+```{r}
+library(dplyr)
+library(tibble)
+##################################################
+############# main model #########################
+##################################################
+permanova_table <- as.data.frame(adonis_main) %>%
+  tibble::rownames_to_column("Variable") %>%
+  dplyr::filter(
+    !Variable %in% c("Residual", "Total")
+  ) %>%
+  dplyr::rename(
+    Sum_of_squares = SumOfSqs,
+    Pseudo_F = F,
+    P_value = `Pr(>F)`
+  ) %>%
+  dplyr::mutate(
+    FDR = p.adjust(
+      P_value,
+      method = "BH"
+    )
+  )
+
+permanova_table <- permanova_table %>%
+  mutate(
+    Variable = recode(
+      Variable,
+      "fetal_sex_binary" = "Fetal sex",
+      "gest_week_s" = "Gestational week",
+      "bmi_s" = "Pre-pregnancy BMI",
+      "age_s" = "Maternal age",
+      "parity_s" = "Parity",
+      "Residency_status" = "Residency status"
+    )
+  )
+
+permanova_table_display <- permanova_table %>%
+  mutate(
+    R2 = round(R2, 4),
+    Pseudo_F = round(Pseudo_F, 3),
+    P_value = signif(P_value, 3),
+    FDR = signif(FDR, 3)
+  )
+
+write.csv(
+  permanova_table,
+  file.path(tabledir, "PERMANOVA_BrayCurtis_results_main.csv"),
+  row.names = FALSE
+)
+
+##################################################
+############# interaction model ##################
+##################################################
+permanova_table <- as.data.frame(adonis_interaction) %>%
+  tibble::rownames_to_column("Variable") %>%
+  dplyr::filter(
+    !Variable %in% c("Residual", "Total")
+  ) %>%
+  dplyr::rename(
+    Sum_of_squares = SumOfSqs,
+    Pseudo_F = F,
+    P_value = `Pr(>F)`
+  ) %>%
+  dplyr::mutate(
+    FDR = p.adjust(
+      P_value,
+      method = "BH"
+    )
+  )
+
+permanova_table <- permanova_table %>%
+  mutate(
+    Variable = recode(
+      Variable,
+      "fetal_sex_binary" = "Fetal sex",
+      "gest_week_s" = "Gestational week",
+      "bmi_s" = "Pre-pregnancy BMI",
+      "age_s" = "Maternal age",
+      "parity_s" = "Parity",
+      "Residency_status" = "Residency status",
+      "fetal_sex_binary:gest_week_s" = "Fetal sex:Gestational week"
+    )
+  )
+
+permanova_table_display <- permanova_table %>%
+  mutate(
+    R2 = round(R2, 4),
+    Pseudo_F = round(Pseudo_F, 3),
+    P_value = signif(P_value, 3),
+    FDR = signif(FDR, 3)
+  )
+
+write.csv(
+  permanova_table,
+  file.path(tabledir, "PERMANOVA_BrayCurtis_results_interaction.csv"),
+  row.names = FALSE
+)
+```
+
+# maaslin2
+## run maaslin2
+```{r}
+# ============================================================
+# MaAsLin2
+# Maternal gut microbiome project
+#
+# Primary hypotheses:
+#   1. fetal sex
+#   2. gestational age
+#   3. fetal sex x gestational age
+#
+# Covariates:
+#   maternal age
+#   BMI before pregnancy
+#   parity
+#   residency status
+#
+# Data:
+#   CSS-normalized ASV table
+# ============================================================
+
+# ============================================================
+# USER SETTINGS
+# ============================================================
+
+outdir <- here("data/MaasLin2/asvs_zinb_scaled")
+
+dir.create(
+  outdir,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+psdir <- here("data/phyloseq")
+
+ps_css <- readRDS(file=file.path(psdir, 'ps_css.rds'))
+
+# Change these to the exact labels in your metadata
+sex_reference <- 0
+sex_comparison <- 1
+
+# Source analysis used 0.25.
+# Use the FDR threshold you have prespecified for your analysis.
+fdr_cutoff <- 0.25
+
+
+# ============================================================
+# Helper: extract sample x feature matrix from phyloseq
+# ============================================================
+
+phyloseq_to_maaslin <- function(ps) {
+
+  x <- as(
+    otu_table(ps),
+    "matrix"
+  )
+
+  if (taxa_are_rows(ps)) {
+    x <- t(x)
+  }
+
+  x <- as.data.frame(
+    x,
+    check.names = FALSE
+  )
+
+  return(x)
+}
+
+metadata_healthy <- metadata_healthy %>%
+  mutate(fetal_sex_binary = as.factor(fetal_sex_binary)) %>%
+  mutate(Residency_status = as.factor(Residency_status))
+
+# ============================================================
+# Check model variables
+# ============================================================
+
+model_variables <- c(
+  "fetal_sex_binary",
+  "gest_week_s",
+  "sex_x_ega",
+  "age_s",
+  "bmi_s",
+  "parity_s",
+  "Residency_status"
+)
+
+missing_variables <- setdiff(
+  model_variables,
+  colnames(metadata_healthy)
+)
+
+if (length(missing_variables) > 0) {
+  stop(
+    "Missing metadata variables: ",
+    paste(
+      missing_variables,
+      collapse = ", "
+    )
+  )
+}
+
+print(
+  summary(
+    metadata_healthy[ , model_variables],
+    useNA = "ifany"
+  )
+)
+```
+
+
+```{r}
+# ============================================================
+# Prepare ASV abundance table
+# ============================================================
+
+input_data <- phyloseq_to_maaslin(
+  ps_css
+)
+
+# Make sure samples match
+common_samples <- intersect(
+  rownames(input_data),
+  rownames(metadata_healthy)
+)
+
+input_data <- input_data[
+  common_samples,
+  ,
+  drop = FALSE
+]
+
+metadata_healthy <- metadata_healthy[
+  common_samples,
+  ,
+  drop = FALSE
+]
+
+stopifnot(
+  identical(
+    rownames(input_data),
+    rownames(metadata_healthy)
+  )
+)
+
+message(
+  "Samples entering MaAsLin2: ",
+  nrow(metadata_healthy)
+)
+
+message(
+  "ASVs entering MaAsLin2: ",
+  ncol(input_data)
+)
+
+
+# ============================================================
+# Run MaAsLin2
+#
+# This preserves the settings from the original analysis:
+#
+# CSS data
+# normalization = NONE
+# transformation = NONE
+# ZINB
+#
+# NOTE:
+# I would not use this setup for PICRUSt2 functional tables.
+# ============================================================
+
+fixed_effects <- model_variables
+
+# ------------------------------------------------------------
+# No repeated-measures version
+# ------------------------------------------------------------
+
+message(
+  "Running without a random effect."
+)
+
+fit_data <- Maaslin2(
+  input_data = input_data,
+  input_metadata = metadata_healthy,
+  output = outdir,
+
+  fixed_effects = fixed_effects,
+
+  normalization = "NONE",
+  transform = "NONE",
+  analysis_method = "ZINB",
+
+  min_prevalence = 0.25,
+  standardize = FALSE,
+
+  max_significance = fdr_cutoff,
+  heatmap_first_n = 10,
+
+  save_models = TRUE
+)
+
+
+# ============================================================
+# Extract MaAsLin2 results
+# ============================================================
+
+fit_results <- fit_data$results
+
+message(
+  "Total MaAsLin2 coefficient tests: ",
+  nrow(fit_results)
+)
+
+
+# ============================================================
+# Extract ZINB convergence status
+# ============================================================
+
+convergence_values <- unlist(
+  fit_data$fits
+)
+
+convergence_values <- convergence_values[
+  grep(
+    "convergence",
+    names(convergence_values)
+  )
+]
+
+convergence_df <- data.frame(
+  feature = names(convergence_values),
+  convergence_status = as.numeric(
+    convergence_values
+  ),
+  stringsAsFactors = FALSE
+)
+
+convergence_df$feature <- gsub(
+  ".fit.convergence",
+  "",
+  convergence_df$feature,
+  fixed = TRUE
+)
+
+
+# ============================================================
+# Add convergence status
+# ============================================================
+
+fit_results <- fit_results %>%
+  left_join(
+    convergence_df,
+    by = "feature"
+  )
+
+
+# ============================================================
+# Add taxonomy
+# ============================================================
+
+taxonomy_df <- as.data.frame(
+  tax_table(ps_css),
+  stringsAsFactors = FALSE
+)
+
+taxonomy_df$feature <- rownames(
+  taxonomy_df
+)
+
+fit_results <- fit_results %>%
+  left_join(
+    taxonomy_df,
+    by = "feature"
+  )
+
+
+# ============================================================
+# Add analysis metadata
+# ============================================================
+
+fit_results <- fit_results %>%
+  mutate(
+    normalization_used = "CSS",
+    transformation_used = "NONE",
+    analysis_method_used = "ZINB",
+    prevalence_filter = 0.25
+  )
+
+message(
+  "MaAsLin2 analysis complete."
+)
+```
+
+## Plot significant microbes
+```{r}
+# load maaslin2 results
+microbes <- read.csv(file = file.path(outdir, "all_results.tsv"), sep = "\t")
+```
+
+```{r}
+sex_microbes <- microbes %>%
+  filter(qval < 0.25) %>%
+  filter(metadata %in% c("fetal_sex_binary", "gest_week_s", "sex_x_ega"))
+
+selected_kegg_ids <- sex_microbes$feature
+```
+
+```{r}
+input_data <- data.frame(otu_table(ps_css))
+input_meta <- data.frame(sample_data(ps_css))
+input_taxa <- data.frame(tax_table(ps_css))
+
+# create new col in input taxa containing the lowest level
+for (i in 1:nrow(input_taxa)) {
+  if (input_taxa$Species[i] != "s__") {
+    input_taxa$plotnames[i] = paste(input_taxa$Genus[i], input_taxa$Species[i], "(s)", sep = " ")
+  } else if (input_taxa$Genus[i] != "g__") {
+    input_taxa$plotnames[i] = paste(input_taxa$Genus[i], "(g)", sep = " ")
+  } else if (input_taxa$Family[i] != "f__") {
+    input_taxa$plotnames[i] = paste(input_taxa$Family[i], "(f)", sep = " ")
+  } else if (input_taxa$Order[i] != "o__") {
+    input_taxa$plotnames[i] = paste(input_taxa$Order[i], "(o)", sep = " ")
+  } else if (input_taxa$Class[i] != "c__") {
+    input_taxa$plotnames[i] = paste(input_taxa$Class[i], "(c)", sep = " ")
+  } else if (input_taxa$Phylum[i] != "p__") {
+    input_taxa$plotnames[i] = paste(input_taxa$Phylum[i], "(p)", sep = " ")
+  } else {
+    input_taxa$plotnames[i] = paste(input_taxa$Kingdom[i], "(k)", sep = " ")
+  }
+}
+
+rm(i)
+```
+
+
+```{r}
+taxa_lookup <- input_taxa %>%
+  rownames_to_column("feature") %>%
+  select(
+    feature,
+    plotnames
+  )
+
+sex_microbes <- sex_microbes %>%
+  left_join(
+    taxa_lookup,
+    by = "feature"
+  )
+
+write.csv(sex_microbes, file = file.path(outdir, "sex_ega_sig_microbes.csv"))
+```
+
+```{r}
+sex_microbes <- read.csv(file = file.path(outdir, "sex_ega_sig_microbes.csv"))
+
+metadata_colors <- c(
+  "Fetal sex" = "#FDB462",
+  "Gestational week" = "#8DD3C7",
+  "Sex × gestational week" = "#BC80BD"
+)
+
+# ============================================================
+# Prepare plotting dataframe
+# ============================================================
+
+asv_plot_df <- sex_microbes %>%
+  mutate(
+    # --------------------------------------------------------
+    # Clean metadata names
+    # --------------------------------------------------------
+    metadata = recode(
+      metadata,
+      "fetal_sex_binary" = "Fetal sex",
+      "gest_week_s" = "Gestational week",
+      "sex_x_ega" = "Sex × gestational week"
+    ),
+
+    metadata = factor(
+      metadata,
+      levels = c(
+        "Fetal sex",
+        "Gestational week",
+        "Sex × gestational week"
+      )
+    ),
+
+    # Useful for optional point-size mapping
+    neg_log10_q = -log10(qval),
+
+    direction = if_else(
+      coef >= 0,
+      "Positive",
+      "Negative"
+    )
+  )
+
+# ============================================================
+# Plot 1: ASVs
+# ============================================================
+
+name_plot_df <- asv_plot_df %>%
+  arrange(
+    metadata,
+    coef
+  ) %>%
+  mutate(
+    plot_label = paste(
+      metadata,
+      feature,
+      sep = "___META___"
+    ),
+    plot_label = factor(
+      plot_label,
+      levels = unique(plot_label)
+    )
+  )
+
+p_names <- ggplot(
+  name_plot_df,
+  aes(
+    x = coef,
+    y = plot_label,
+    color = metadata
+  )
+) +
+  geom_vline(
+    xintercept = 0,
+    linetype = "dashed",
+    linewidth = 0.5
+  ) +
+  # Lollipop stems
+  geom_segment(
+    data = name_plot_df,
+    aes(
+      x = 0,
+      xend = coef,
+      y = plot_label,
+      yend = plot_label
+    ),
+    color = "gray",
+    linewidth = 0.5,
+    inherit.aes = FALSE
+  ) +
+
+  # Lollipop points
+  geom_point(
+    aes(size = neg_log10_q),
+    alpha = 0.85
+  ) +
+  facet_grid(
+    rows = vars(metadata),
+    scales = "free_y",
+    space = "free_y"
+  ) +
+  scale_y_discrete(
+    labels = function(x) {
+      sub(
+        "^.*___META___",
+        "",
+        x
+      )
+    }
+  ) +
+  scale_color_manual(
+    values = metadata_colors
+  ) +
+  scale_size_continuous(
+    range = c(2, 5),
+    name = expression(-log[10](q))
+  ) +
+  labs(
+    x = "MaAsLin coefficient",
+    y = NULL,
+    title = "Differential ASVs"
+  ) +
+  theme_classic() +
+  theme(
+    legend.position = "right",
+    strip.text.y = element_text(
+      face = "bold",
+      size = 16
+    ),
+    axis.text.y = element_text(
+      size = 12
+    ),
+    axis.title.x = element_text(
+      size = 16
+    )
+  )
+
+p_names
+
+ggsave(file.path(plotdir, "asv_lollipop.png"), plot = p_names, dpi = 600, width = 8, height = 10, units = "in", limitsize = FALSE)
+
+# ============================================================
+# Plot 1: Taxa names (plotnames)
+# ============================================================
+
+name_plot_df <- asv_plot_df %>%
+  arrange(
+    metadata,
+    coef
+  ) %>%
+  mutate(
+    plot_label = paste(
+      metadata,
+      plotnames,
+      sep = "___META___"
+    ),
+    plot_label = factor(
+      plot_label,
+      levels = unique(plot_label)
+    )
+  )
+
+p_names <- ggplot(
+  name_plot_df,
+  aes(
+    x = coef,
+    y = plot_label,
+    color = metadata
+  )
+) +
+  geom_vline(
+    xintercept = 0,
+    linetype = "dashed",
+    linewidth = 0.5
+  ) +
+  # Lollipop stems
+  geom_segment(
+    data = name_plot_df,
+    aes(
+      x = 0,
+      xend = coef,
+      y = plot_label,
+      yend = plot_label
+    ),
+    color = "gray",
+    linewidth = 0.5,
+    inherit.aes = FALSE
+  ) +
+
+  # Lollipop points
+  geom_point(
+    aes(size = neg_log10_q),
+    alpha = 0.85
+  ) +
+  facet_grid(
+    rows = vars(metadata),
+    scales = "free_y",
+    space = "free_y"
+  ) +
+  scale_y_discrete(
+    labels = function(x) {
+      sub(
+        "^.*___META___",
+        "",
+        x
+      )
+    }
+  ) +
+  scale_color_manual(
+    values = metadata_colors
+  ) +
+  scale_size_continuous(
+    range = c(2, 5),
+    name = expression(-log[10](q))
+  ) +
+  labs(
+    x = "MaAsLin coefficient",
+    y = NULL
+  ) +
+  theme_classic() +
+  theme(
+    legend.position = "right",
+    strip.text.y = element_text(
+      face = "bold",
+      size = 14
+    ),
+    axis.text.y = element_text(
+      size = 12
+    ),
+    axis.title.x = element_text(
+      size = 16
+    )
+  )
+
+p_names
+
+ggsave(file.path(plotdir, "taxa_names_lollipop.png"), plot = p_names, dpi = 600, width = 8, height = 8, units = "in", limitsize = FALSE)
+```
+
+```{r}
+asv_significance_groups <- sex_microbes %>%
+  dplyr::mutate(
+    metadata = trimws(as.character(metadata))
+  ) %>%
+  dplyr::filter(
+    metadata %in% c(
+      "fetal_sex_binary",
+      "gest_week_s",
+      "sex_x_ega"
+    )
+  ) %>%
+  dplyr::distinct(
+    feature,
+    metadata
+  ) %>%
+  dplyr::mutate(
+    sig_sex = metadata == "fetal_sex_binary",
+    sig_gest_week = metadata == "gest_week_s",
+    sig_interaction = metadata == "sex_x_ega"
+  ) %>%
+  dplyr::group_by(feature) %>%
+  dplyr::summarise(
+    sig_sex = any(sig_sex),
+    sig_gest_week = any(sig_gest_week),
+    sig_interaction = any(sig_interaction),
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+    significance_group = dplyr::case_when(
+      # Significant interaction takes priority,
+      # regardless of whether main effects are also significant
+      sig_interaction ~
+        "Fetal sex x EGA interaction",
+
+      # Sex only
+      sig_sex &
+        !sig_gest_week &
+        !sig_interaction ~
+        "Fetal sex",
+
+      # EGA only
+      !sig_sex &
+        sig_gest_week &
+        !sig_interaction ~
+        "EGA",
+
+      # Both main effects significant, but interaction not significant
+      sig_sex &
+        sig_gest_week &
+        !sig_interaction ~
+        "Fetal sex + EGA",
+
+      TRUE ~ "Other"
+    )
+  )
+
+asv_significance_groups <- asv_significance_groups %>%
+  dplyr::mutate(
+    significance_group = factor(
+      significance_group,
+      levels = c(
+        "Fetal sex",
+        "EGA",
+        "Fetal sex + EGA",
+        "Fetal sex x EGA interaction"
+      )
+    )
+  )
+
+asv_significance_groups %>%
+  dplyr::count(
+    significance_group,
+    name = "n_asvs"
+  ) %>%
+  dplyr::arrange(
+    dplyr::desc(n_asvs)
+  )
+```
+
+## plot sig keggs - final
+```{r}
+library(grid)
+# ============================================================
+# Keep only the four significance groups to plot
+# ============================================================
+
+groups_to_plot <- c(
+  "Fetal sex",
+  "EGA"
+ # "Fetal sex + EGA"
+#  "Fetal sex x EGA interaction"
+)
+
+# don't plot gestational week coefficients 
+asv_df_plot <- sex_microbes %>%
+  dplyr::left_join(
+    asv_significance_groups %>%
+      dplyr::select(
+        feature,
+        significance_group
+      ),
+    by = "feature"
+  ) %>%
+  dplyr::filter(
+    significance_group %in% groups_to_plot
+  ) %>%
+  dplyr::mutate(
+    significance_group = factor(
+      significance_group,
+      levels = groups_to_plot
+    ),
+
+    neg_log10_q = -log10(qval),
+
+    direction = dplyr::if_else(
+      coef >= 0,
+      "Positive",
+      "Negative"
+    )
+  )
+
+group_colors <- c(
+  "Fetal sex" = "#BC80BD",
+  "EGA" = "#0072B2"
+ # "Fetal sex + EGA" = "#7A5195",
+ # "Interaction only" = "#CC79A7",
+#  "Fetal sex x EGA interaction" = "#0072B2"
+)
+
+asv_df_plot <- asv_df_plot %>%
+  dplyr::arrange(
+    significance_group,
+    coef
+  ) %>%
+  dplyr::mutate(
+    plot_label = paste(
+      significance_group,
+      plotnames,
+      sep = "___GROUP___"
+    ),
+
+    plot_label = factor(
+      plot_label,
+      levels = unique(plot_label)
+    )
+  )
+
+# ============================================================
+# Colors for the actual MaAsLin terms being plotted
+# ============================================================
+
+metadata_colors <- c(
+  "Fetal sex" = "#BC80BD",
+  "EGA" = "#0072B2"
+)
+# ============================================================
+# Prepare plotting data
+#
+# Keep:
+#   - Sex only
+#   - EGA only
+#   - Sex + EGA
+#
+# Exclude significant interactions
+# ============================================================
+
+asv_df_plot_filtered <- asv_df_plot %>%
+  dplyr::filter(
+    significance_group %in% c(
+      "Fetal sex",
+      "EGA"#,
+    #  "Fetal sex + EGA"
+    )
+  ) %>%
+  dplyr::filter(
+    metadata %in% c(
+      "fetal_sex_binary",
+      "gest_week_s"
+    )
+  ) %>%
+  dplyr::mutate(
+    metadata = dplyr::recode(
+      metadata,
+      "fetal_sex_binary" = "Fetal sex",
+      "gest_week_s" = "EGA"
+    ),
+    metadata = factor(
+      metadata,
+      levels = c(
+        "Fetal sex",
+        "EGA"
+      )
+    )
+  )
+
+# ============================================================
+# Set enzyme ordering
+#
+# Each NAME_short gets exactly one y-axis position.
+# ============================================================
+
+asv_name_order <- asv_df_plot_filtered %>%
+  dplyr::group_by(
+    plotnames
+  ) %>%
+  dplyr::summarise(
+    mean_coef = mean(
+      coef,
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  ) %>%
+  dplyr::arrange(
+    mean_coef
+  )
+
+asv_df_plot_filtered <- asv_df_plot_filtered %>%
+  dplyr::mutate(
+    plot_label = factor(
+      plotnames,
+      levels = asv_name_order$plotnames
+    )
+  )
+
+p_asv_groups <- ggplot(
+  asv_df_plot_filtered,
+  aes(
+    x = coef,
+    y = plot_label,
+    color = metadata
+  )
+) +
+
+  geom_vline(
+    xintercept = 0,
+    linetype = "dashed",
+    linewidth = 0.5
+  ) +
+
+  # ----------------------------------------------------------
+  # Lollipop stems
+  #
+  # If an enzyme has both sex and EGA associations,
+  # both stems/dots occupy the same y-axis line.
+  # ----------------------------------------------------------
+
+  geom_segment(
+    aes(
+      x = 0,
+      xend = coef,
+      y = plot_label,
+      yend = plot_label,
+      color = metadata
+    ),
+    linewidth = 0.5,
+    alpha = 0.35,
+    show.legend = FALSE
+  ) +
+
+  geom_point(
+    aes(
+      size = neg_log10_q,
+      color = metadata
+    ),
+    alpha = 0.9
+  ) +
+
+  scale_color_manual(
+    values = metadata_colors,
+    breaks = c(
+      "Fetal sex",
+      "EGA"
+    ),
+    drop = FALSE
+  ) +
+
+  scale_size_continuous(
+    range = c(
+      2,
+      5
+    ),
+    name = expression(-log[10](q))
+  ) +
+
+  labs(
+    x = "MaAsLin coefficient",
+    y = NULL,
+    color = "Significant association",
+    size = expression(-log[10](q))
+  ) +
+
+  guides(
+    color = guide_legend(
+      order = 1,
+      title.position = "top",
+      override.aes = list(
+        size = 6,
+        alpha = 1
+    )
+    ),
+    size = guide_legend(
+      order = 2,
+      title.position = "top"
+    )
+  ) +
+  
+  theme_classic() +
+  
+  theme(
+    legend.position = "bottom",
+    legend.box = "horizontal",
+    legend.direction = "vertical",
+    legend.title = element_text(
+      size = 16
+    ),
+    axis.text.x = element_text(
+      size = 14
+    ),
+    legend.text = element_text(
+      size = 13
+    ),
+    axis.text.y = element_text(
+       size = 12
+     ),
+    axis.title.x = element_text(
+      size = 14
+    )
+  )
+  # +
+  # 
+  # theme(
+  #   legend.position = "bottom",
+  #   legend.box = "horizontal",
+  # 
+
+
+p_asv_groups
+
+ggsave(
+  file.path(
+    plotdir,
+    "asv_significance_groups_lollipop.png"
+  ),
+  plot = p_asv_groups,
+  dpi = 600,
+  width = 8,
+  height =8,
+  units = "in",
+  limitsize = FALSE
+)
+```
+
+
+
+
+
+## trimester plots - final
+```{r}
+library(ggh4x)
+
+all_sig_sex_int <- microbes %>%
+  filter(metadata == "sex_x_ega")
+
+asvs_to_plot <- all_sig_sex_int$feature
+
+# don't plot gestational week coefficients 
+asv_df_plot <- microbes %>%
+  dplyr::left_join(
+    asv_significance_groups %>%
+      dplyr::select(
+        feature,
+        significance_group
+      ),
+    by = "feature"
+  ) %>%
+  dplyr::filter(
+    significance_group %in% groups_to_plot
+  ) %>%
+  dplyr::mutate(
+    significance_group = factor(
+      significance_group,
+      levels = groups_to_plot
+    ),
+
+    neg_log10_q = -log10(qval),
+
+    direction = dplyr::if_else(
+      coef >= 0,
+      "Positive",
+      "Negative"
+    )
+  )
+# ============================================================
+# 5. Extract coefficients needed to calculate
+#    conditional fetal-sex effect
+#
+# NOTE:
+# gest_week_s determines which asvs are included/grouped,
+# but it is NOT part of the conditional fetal-sex equation.
+#
+# Conditional sex effect =
+# beta_sex + beta_sex_ega * gest_week_s
+# ============================================================
+
+sex_coefficients <- microbes %>%
+  dplyr::mutate(
+    metadata = trimws(as.character(metadata)),
+    feature = as.character(feature),
+    coef = as.numeric(coef)
+  ) %>%
+  dplyr::filter(
+    metadata %in% c(
+      "fetal_sex_binary",
+      "sex_x_ega"
+    )
+  ) %>%
+  dplyr::select(
+    feature,
+    metadata,
+    coef
+  ) %>%
+  dplyr::distinct() %>%
+  tidyr::pivot_wider(
+    names_from = metadata,
+    values_from = coef
+  ) %>%
+  dplyr::rename(
+    beta_sex = fetal_sex_binary,
+    beta_sex_ega = sex_x_ega
+  ) %>%
+  dplyr::filter(
+    feature %in% asvs_to_plot
+  )
+
+# ============================================================
+# Add significance group + plotnames to sex_coefficients
+# ============================================================
+
+sex_coefficients <- sex_coefficients %>%
+  dplyr::left_join(
+    asv_significance_groups %>%
+      dplyr::select(
+        feature,
+        significance_group
+      ) %>%
+      dplyr::distinct(),
+    by = "feature"
+  ) %>%
+  dplyr::left_join(
+    sex_microbes %>%
+      dplyr::select(
+        feature,
+        plotnames
+      ) %>%
+      dplyr::filter(
+        !is.na(plotnames)
+      ) %>%
+      dplyr::distinct(
+        feature,
+        .keep_all = TRUE
+      ),
+    by = "feature"
+  )
+
+# ============================================================
+# 6. Check that all selected asvs have coefficients
+# ============================================================
+
+missing_coefs <- setdiff(
+  asvs_to_plot,
+  sex_coefficients$feature
+)
+
+if (length(missing_coefs) > 0) {
+  warning(
+    length(missing_coefs),
+    " selected asvs are missing sex/interaction coefficients."
+  )
+}
+
+# ============================================================
+# 8. Participant-level metadata
+# ============================================================
+
+participant_meta <- input_meta %>%
+  tibble::rownames_to_column(
+    "sample_id"
+  ) %>%
+  dplyr::mutate(
+    fetal_sex = dplyr::case_when(
+      fetal_sex_binary == 0 ~ "Male",
+      fetal_sex_binary == 1 ~ "Female",
+      TRUE ~ NA_character_
+    ),
+
+    fetal_sex = factor(
+      fetal_sex,
+      levels = c(
+        "Male",
+        "Female"
+      )
+    ),
+
+    trimester = dplyr::case_when(
+      Gestation_week < 14 ~
+        "Trimester 1",
+
+      Gestation_week >= 14 &
+        Gestation_week < 28 ~
+        "Trimester 2",
+
+      Gestation_week >= 28 ~
+        "Trimester 3",
+
+      TRUE ~ NA_character_
+    ),
+
+    trimester = factor(
+      trimester,
+      levels = c(
+        "Trimester 1",
+        "Trimester 2",
+        "Trimester 3"
+      )
+    )
+  )
+
+# # ============================================================
+# # Add asv annotations/significance group to coefficient table
+# # ============================================================
+# 
+# asv_annotation_df <- asv_df_plot %>%
+#   dplyr::select(
+#     feature,
+#     significance_group
+#   ) %>%
+#   dplyr::distinct()
+# 
+# sex_coefficients <- sex_coefficients %>%
+#   dplyr::left_join(
+#     asv_annotation_df,
+#     by = "feature"
+#   )
+
+# ============================================================
+# 9. Generate participant-specific conditional sex effects
+#
+# THIS MUST BE REBUILT HERE.
+#
+# Do not reuse sex_effect_participant from the first
+# sex_x_ega-only plot.
+# ============================================================
+asvs_to_plot <- sex_microbes %>%
+  filter(metadata == "sex_x_ega")
+
+sex_effect_participant <- sex_coefficients %>%
+  tidyr::crossing(
+    participant_meta
+  ) %>%
+  dplyr::mutate(
+    effective_sex_coef =
+      beta_sex +
+      beta_sex_ega * as.numeric(gest_week_s)
+  ) %>%
+  dplyr::filter(
+    !is.na(trimester),
+    !is.na(fetal_sex),
+    !is.na(effective_sex_coef),
+    !is.na(significance_group),
+    !is.na(plotnames),
+    significance_group == "Fetal sex x EGA interaction"
+  )
+
+# ============================================================
+# 10. Verify that all significance groups are represented
+# ============================================================
+
+group_counts <- sex_effect_participant %>%
+  dplyr::distinct(
+    feature,
+    significance_group
+  ) %>%
+  dplyr::count(
+    significance_group,
+    name = "n_asvs"
+  )
+
+print(group_counts)
+
+
+# ============================================================
+# 11. Define asv ordering
+#
+# Use the sex × EGA coefficient as the ordering variable
+# when available.
+#
+# Because the plotting ID includes significance group,
+# asvs remain separated correctly across facet groups.
+# ============================================================
+
+plot_order_df <- sex_coefficients %>%
+  dplyr::select(
+    feature,
+    plotnames,
+    significance_group,
+    beta_sex_ega
+  ) %>%
+  dplyr::distinct() %>%
+  dplyr::arrange(
+    significance_group,
+    beta_sex_ega
+  ) %>%
+  dplyr::mutate(
+    plot_id = paste(
+      significance_group,
+      feature,
+      sep = "___GROUP___"
+    )
+  )
+
+plot_levels <- unique(
+  plot_order_df$plot_id
+)
+
+
+# ============================================================
+# 12. Apply plotting ID/order
+# ============================================================
+
+sex_effect_participant <- sex_effect_participant %>%
+  dplyr::mutate(
+    plot_id = paste(
+      significance_group,
+      feature,
+      sep = "___GROUP___"
+    ),
+
+    plot_id = factor(
+      plot_id,
+      levels = plot_levels
+    )
+  )
+
+
+# ============================================================
+# 13. Taxonomy display labels
+# ============================================================
+
+plot_labels <- setNames(
+  plot_order_df$plotnames,
+  plot_order_df$plot_id
+)
+
+
+# ============================================================
+# 14. Calculate mean conditional effect within trimester
+# ============================================================
+
+sex_effect_participant <- sex_effect_participant %>%
+  dplyr::group_by(
+    plot_id,
+    trimester
+  ) %>%
+  dplyr::mutate(
+    mean_effective_coef = mean(
+      effective_sex_coef,
+      na.rm = TRUE
+    ),
+
+    mean_direction = dplyr::if_else(
+      mean_effective_coef < 0,
+      "Mean < 0",
+      "Mean > 0"
+    )
+  ) %>%
+  dplyr::ungroup()
+
+
+# ============================================================
+# Dummy data for significance-group legend
+# ============================================================
+
+legend_group_df <- sex_effect_participant %>%
+  dplyr::distinct(
+    significance_group
+  ) %>%
+  dplyr::filter(
+    !is.na(significance_group)
+  )
+
+# ============================================================
+# Plot
+# ============================================================
+
+p <- ggplot(
+  sex_effect_participant,
+  aes(
+    x = effective_sex_coef,
+    y = plot_id
+  )
+) +
+  geom_boxplot(
+    aes(
+      fill = mean_direction
+    ),
+    width = 0.65,
+    outlier.shape = NA
+  ) +
+
+  geom_jitter(
+    width = 0,
+    height = 0.08,
+    size = 1,
+    alpha = 0.4,
+    color = "grey30"
+  ) +
+
+  # Invisible points used only to create significance-group legend
+  geom_point(
+    data = legend_group_df,
+    aes(
+      x = Inf,
+      y = Inf,
+      color = significance_group
+    ),
+    inherit.aes = FALSE,
+    alpha = 0
+  ) +
+
+  geom_vline(
+    xintercept = 0,
+    color = "darkgrey",
+    linewidth = 0.5
+  ) +
+
+  ggh4x::facet_grid2(
+    rows = vars(significance_group),
+    cols = vars(trimester),
+    scales = "free_y",
+    space = "free_y",
+    # strip = ggh4x::strip_themed(
+    #   background_y = ggh4x::elem_list_rect(
+    #     fill = unname(group_colors),
+    #     color = NA
+    #   ),
+    #   text_y = ggh4x::elem_list_text(
+    #     colour = "transparent",
+    #     size = 1,
+    #     hjust = 0.5,
+    #     vjust = 0.5
+    #   )
+    # )
+  ) +
+
+  scale_fill_manual(
+    values = c(
+      "Mean < 0" = "#50B93A",
+      "Mean > 0" = "#9C7FB9"
+    ),
+    drop = FALSE
+  ) +
+
+  scale_color_manual(
+    values = group_colors,
+    breaks = levels(
+      sex_effect_participant$significance_group
+    ),
+    drop = FALSE
+  ) +
+
+  scale_y_discrete(
+    labels = plot_labels
+  ) +
+
+  labs(
+    x = "Conditional fetal sex effect (Female - Male)",
+    y = "",
+    color = "Significant association",
+    fill = "Mean coefficient"
+  ) +
+
+  guides(
+    color = guide_legend(
+      order = 1,
+      title.position = "top",
+      override.aes = list(
+        alpha = 1,
+        size = 7,
+        shape = 15
+      )
+    ),
+
+    fill = guide_legend(
+      order = 2,
+      title.position = "top",
+      override.aes = list(
+        size = 6
+      )
+    )
+  ) +
+
+  theme_classic() +
+  theme(
+    legend.position = "bottom",
+    legend.box = "horizontal",
+    legend.direction = "vertical",
+    legend.title = element_text(
+      size = 16
+    ),
+    legend.text = element_text(
+      size = 14
+    )
+  ) +
+  
+  theme(
+    axis.text.y = element_text(
+      size = 14
+    ),
+
+    axis.text.x = element_text(
+      size = 14
+    ),
+
+    axis.title.x = element_text(
+      size = 15
+    ),
+
+    strip.text.x = element_text(
+      size = 14,
+      face = "bold"
+    ),
+
+    strip.text.y = element_blank(),
+    strip.background.y = element_blank()
+    ) +
+
+    guides(
+    fill = guide_legend(
+      order = 1
+    ),
+
+    color = guide_legend(
+      order = 2,
+      override.aes = list(
+        alpha = 1,
+        size = 5,
+        shape = 15
+      )
+    )
+  )
+
+  # theme(
+  #   axis.text.y = element_text(
+  #     size = 11
+  #   ),
+  # 
+  #   axis.text.x = element_text(
+  #     size = 11
+  #   ),
+  # 
+  #   axis.title.x = element_text(
+  #     size = 13
+  #   ),
+  # 
+  #   strip.text = element_text(
+  #     size = 12,
+  #     face = "bold"
+  #   ),
+  # 
+  #   legend.title = element_text(
+  #     size = 12
+  #   ),
+  # 
+  #   legend.text = element_text(
+  #     size = 11
+  #   )
+  # )
+
+p
+
+
+ggsave(file.path(plotdir, "ECs_sex_adjusted_box_per_tri.png"), plot = p, dpi = 600, 
+       width = 12, height = 8, units = "in", limitsize = FALSE)
+```
+
